@@ -1,0 +1,5 @@
+.env
+credentials.json
+accounts.json
+app_activity.log
+__pycache__/
