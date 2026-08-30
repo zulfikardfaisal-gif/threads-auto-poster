@@ -41,33 +41,79 @@ def get_config_val(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 # ==========================================
-# 2. HELPER DATA MULTI-AKUN (SECRETS + LOKAL)
+# 2. HELPER DATA MULTI-AKUN (PERMANEN GOOGLE SHEETS)
 # ==========================================
+def get_accounts_worksheet():
+    """Membuka atau membuat tab 'Accounts' di Google Sheets"""
+    s_id = get_config_val("SPREADSHEET_ID")
+    c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
+    
+    if not s_id:
+        return None
+        
+    try:
+        # 1. Cek Secrets Cloud
+        if "GCP_SERVICE_ACCOUNT" in st.secrets:
+            raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
+            creds_info = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
+            if "private_key" in creds_info:
+                creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+            creds = Credentials.from_service_account_info(creds_info, scopes=SheetsManager.SCOPES)
+        # 2. Cek File Lokal
+        elif os.path.exists(c_json):
+            creds = Credentials.from_service_account_file(c_json, scopes=SheetsManager.SCOPES)
+        else:
+            return None
+
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(s_id)
+        
+        try:
+            return spreadsheet.worksheet("Accounts")
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title="Accounts", rows=50, cols=5)
+            ws.append_row(["name", "user_id", "access_token"])
+            return ws
+    except Exception as e:
+        logger.error(f"Gagal konek ke tab Accounts: {e}")
+        return None
+
 def load_accounts() -> list:
-    """Membaca akun dari Secrets Cloud secara permanen atau dari accounts.json lokal"""
+    """Membaca akun permanen dari Google Sheets (tab Accounts)"""
+    ws = get_accounts_worksheet()
+    if ws:
+        try:
+            records = ws.get_all_records()
+            return [r for r in records if str(r.get("user_id", "")).strip() != ""]
+        except Exception:
+            pass
+    
+    # Fallback ke Secrets jika ada
     if "ACCOUNTS_JSON" in st.secrets:
         try:
             val = st.secrets["ACCOUNTS_JSON"]
-            if isinstance(val, str):
-                return json.loads(val)
-            elif isinstance(val, list):
-                return val
-        except Exception as e:
-            logger.error(f"Error parsing ACCOUNTS_JSON secrets: {e}")
-
-    if os.path.exists(ACCOUNTS_FILE):
-        try:
-            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            return json.loads(val) if isinstance(val, str) else val
         except Exception:
-            return []
+            pass
     return []
 
-def save_accounts(accounts: list):
-    """Menyimpan data akun ke file lokal accounts.json"""
-    with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(accounts, f, indent=2, ensure_ascii=False)
+def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
+    """Menyimpan akun baru secara permanen ke Google Sheets"""
+    ws = get_accounts_worksheet()
+    if ws:
+        ws.append_row([str(name).strip(), str(user_id).strip(), str(access_token).strip()])
+    else:
+        raise Exception("Gagal terhubung ke Google Sheets untuk menyimpan akun.")
 
+def delete_account_from_sheets(name: str):
+    """Menghapus akun dari Google Sheets"""
+    ws = get_accounts_worksheet()
+    if ws:
+        records = ws.get_all_records()
+        for i, r in enumerate(records, start=2):
+            if str(r.get("name", "")).strip() == name:
+                ws.delete_rows(i)
+                break
 # ==========================================
 # 3. AI GENERATOR ENGINE (AUTO-DISCOVERY REST API)
 # ==========================================
