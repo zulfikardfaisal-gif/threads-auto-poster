@@ -208,12 +208,12 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. AI ENGINE (ALAMI & GAUL THREADS ID)
+# 3. AI ENGINE (GOOGLE GEMINI 2.0 / 1.5 FLASH)
 # ==========================================
 STYLE_PROMPTS = {
     "🔥 Racun Shopee & Spill Diskon (Alami / Gaul)": (
         "Gaya anak muda Threads Indonesia yang heboh spill barang bagus. "
-        "Gunakan kata-kata natural seperti 'demi apa', 'nangis bgt bagusnya', 'jujurly', 'worth it parah', 'auto racun'. "
+        "Gunakan bahasa natural seperti 'demi apa', 'nangis bgt bagusnya', 'jujurly', 'worth it parah', 'auto racun'. "
         "Hindari bahasa formal atau seperti iklan koran kaku."
     ),
     "📖 Curhat / Review Pengalaman Pribadi": (
@@ -237,67 +237,53 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
-def call_groq_api(prompt: str, api_key: str) -> str:
+def call_gemini_api(prompt: str, api_key: str) -> str:
     clean_key = clean_ascii_str(api_key)
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {clean_key}",
-        "Content-Type": "application/json"
-    }
-    
-    models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
     err_list = []
     
-    system_persona = (
-        "Kamu adalah content creator Threads Indonesia yang sangat viral, jago copywriting Shopee Affiliate yang santai, "
-        "gaul, tidak kaku, tanpa basa-basi formal. Selalu hasilkan output format JSON murni yang diminta."
-    )
-    
     for m in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={clean_key}"
+        headers = {"Content-Type": "application/json"}
         payload = {
-            "model": m,
-            "messages": [
-                {"role": "system", "content": system_persona},
-                {"role": "user", "content": prompt}
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.85
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.85,
+                "response_mime_type": "application/json"
+            }
         }
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=25)
             if res.status_code == 200:
                 data = res.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                if content:
-                    return content
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
             err_list.append(f"[{m}]: HTTP {res.status_code} - {res.text}")
         except Exception as e:
             err_list.append(f"[{m}]: {str(e)}")
             continue
-
-    raise Exception(f"Gagal memanggil AI Engine: {' | '.join(err_list)}")
+            
+    raise Exception(f"Gagal memanggil Google Gemini: {' | '.join(err_list)}")
 
 def call_ai_engine(prompt: str, key_override: str = None) -> str:
-    raw_key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
+    raw_key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY"))
     key = clean_ascii_str(raw_key)
     if not key:
-        raise ValueError("API Key belum disetel!")
-    return call_groq_api(prompt, key)
+        raise ValueError("API Key Google Gemini belum disetel!")
+    return call_gemini_api(prompt, key)
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 3) -> list:
     style_inst = STYLE_PROMPTS.get(style_choice, STYLE_PROMPTS["🔥 Racun Shopee & Spill Diskon (Alami / Gaul)"])
     len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
     
     prompt = (
-        f"Tulis {count} postingan Threads yang SANGAT ALAMI, MENARIK, dan GAUL (bukan bahasa robot/baku) untuk mempromosikan produk ini:\n"
+        f"Kamu adalah Content Creator Threads Indonesia yang sangat viral dan jago copywriting Shopee Affiliate. "
+        f"Tulis {count} postingan Threads yang SANGAT ALAMI, MENARIK, dan GAUL (bukan bahasa robot/baku) untuk produk ini:\n"
         f"- Nama Produk: {product_name}\n"
         f"- Catatan/Kelebihan: {product_notes if product_notes else 'Barang viral, kualitas juara'}\n"
         f"- Gaya Bahasa: {style_inst}\n"
         f"- Batasan Panjang: {len_inst}\n"
         f"- Jumlah Reply di bawah postingan utama: {reply_count} balasan.\n\n"
-        "Contoh gaya penulisan utama yang bagus (JANGAN COPY PERSIS, BUAT SESUAI PRODUK):\n"
-        "'Jujur gatau mau bilang apa lagi, nemu ini di oren beneran penyelamat bgt. Dipake daily ga bikin ribet dan harganya ga masuk akal murahnya 😭🫶'\n\n"
-        "Format Output WAJIB JSON persis seperti ini:\n"
+        "Format Output WAJIB JSON murni persis seperti ini:\n"
         "{\n"
         '  "items": [\n'
         "    {\n"
@@ -354,11 +340,12 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
     items_text = "\n".join([f"- Item #{i+1}: {it['name']} | Catatan: {it['desc']} | Link: {it['link']}" for i, it in enumerate(items)])
     
     prompt = (
-        f"Buat 1 Utas Kurasi Rekomendasi/Top List bertema: \"{curation_topic}\" dengan bahasa linimasa santai dan persuasif.\n\n"
+        f"Kamu adalah Content Creator Threads Indonesia. Buat 1 Utas Kurasi Rekomendasi/Top List bertema: \"{curation_topic}\" "
+        f"dengan bahasa linimasa yang mengalir santai dan memicu klik affiliate.\n\n"
         f"Daftar Produk:\n{items_text}\n\n"
         "Instruksi:\n"
-        f"- main_text: Hook pembuka santai yang bikin orang penasaran baca ke bawah ({len_inst}).\n"
-        f"- replies: Array di mana tiap reply mengulas 1 produk secara natural ({len_inst}), diakhiri link Shopee masing-masing.\n\n"
+        f"- main_text: Hook pembuka santai yang bikin orang penasaran baca ({len_inst}).\n"
+        f"- replies: Array di mana tiap elemen HANYA mengulas 1 produk secara natural ({len_inst}), diakhiri link Shopee masing-masing.\n\n"
         "Format Output WAJIB JSON:\n"
         "{\n"
         '  "main_text": "...",\n'
@@ -749,7 +736,7 @@ with tab_studio:
             if not p_name.strip():
                 st.error("Nama produk wajib diisi!")
             else:
-                with st.spinner(f"AI sedang meracik {p_qty} postingan yang gaul & relate..."):
+                with st.spinner(f"Gemini sedang meracik {p_qty} postingan yang gaul & relate..."):
                     try:
                         batch_res = generate_bulk_single_product_threads(p_name, p_notes, p_link, p_style, len_choice, rep_choice, p_qty)
                         
@@ -852,9 +839,9 @@ with tab_studio:
             if not cur_topic.strip() or any(not it["name"].strip() for it in items_data):
                 st.error("Topik dan semua nama produk wajib diisi!")
             else:
-                with st.spinner("AI sedang meracik hook dan ulasan per produk..."):
+                with st.spinner("Gemini sedang meracik hook dan ulasan per produk..."):
                     try:
-                        cur_res = generate_curated_listicle_thread(curation_topic, items_data, cur_len_choice)
+                        cur_res = generate_curated_listicle_thread(cur_topic, items_data, cur_len_choice)
                         st.session_state["cur_main_txt"] = cur_res.get("main_text", "")
                         st.session_state["cur_replies"] = cur_res.get("replies", [])
                         st.success("✅ Utas Kurasi Berhasil Dibuat!")
@@ -1007,11 +994,11 @@ with tab_settings:
     st.subheader("Konfigurasi API & AI Generator")
     
     with st.form("config_form"):
-        curr_ai_key = get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
+        curr_ai_key = get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY"))
         curr_s_id = get_config_val("SPREADSHEET_ID")
         curr_s_name = get_config_val("SHEET_NAME", "Sheet1")
 
-        val_ai_key = st.text_input("AI API Key (Groq `gsk_...`)", value=curr_ai_key, type="password")
+        val_ai_key = st.text_input("AI API Key (Google Gemini `AIzaSy...`)", value=curr_ai_key, type="password")
         val_s_id = st.text_input("Google Spreadsheet ID", value=curr_s_id)
         val_s_name = st.text_input("Nama Worksheet / Tab Jadwal", value=curr_s_name)
 
@@ -1019,7 +1006,7 @@ with tab_settings:
             if not os.path.exists(ENV_PATH):
                 open(ENV_PATH, "w").close()
             set_key(ENV_PATH, "AI_API_KEY", val_ai_key)
-            set_key(ENV_PATH, "GROQ_API_KEY", val_ai_key)
+            set_key(ENV_PATH, "GEMINI_API_KEY", val_ai_key)
             set_key(ENV_PATH, "SPREADSHEET_ID", val_s_id)
             set_key(ENV_PATH, "SHEET_NAME", val_s_name)
             set_key(ENV_PATH, "GOOGLE_CREDS_JSON", "credentials.json")
@@ -1030,11 +1017,11 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi Generator AI")
     if st.button("🔍 Uji Generator AI Sekarang", use_container_width=True):
-        with st.spinner("Menguji respon AI Engine..."):
+        with st.spinner("Menguji respon Gemini AI..."):
             try:
                 target_key = val_ai_key.strip() if val_ai_key else None
                 test_resp = call_ai_engine("Halo, buatkan 1 kalimat racun affiliate Shopee yang santai dan gaul.", key_override=target_key)
-                st.success(f"✅ AI Engine Aktif & Merespons: \"{test_resp}\"")
+                st.success(f"✅ Gemini AI Aktif & Merespons: \"{test_resp}\"")
             except Exception as e_test:
                 st.error(f"❌ Uji Gagal: {e_test}")
 
