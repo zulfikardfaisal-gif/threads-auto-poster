@@ -211,6 +211,10 @@ def delete_account_from_sheets(name: str):
 # 3. AI ENGINE (DYNAMIC GEMINI DISCOVERY)
 # ==========================================
 STYLE_PROMPTS = {
+    "🎲 Diserahkan ke AI (AI Bebas Memilih Tone Terbaik)": (
+        "Bebaskan AI untuk menganalisis karakteristik produk dan memilih gaya bahasa, sudut pandang, "
+        "serta hook yang paling efektif, relate, viral, dan natural di linimasa Threads Indonesia."
+    ),
     "🔥 Racun Shopee & Spill Diskon (Alami / Gaul)": (
         "Gaya anak muda Threads Indonesia yang heboh spill barang bagus. "
         "Gunakan bahasa natural seperti 'demi apa', 'nangis bgt bagusnya', 'jujurly', 'worth it parah', 'auto racun'. "
@@ -238,7 +242,7 @@ LENGTH_CONSTRAINTS = {
 }
 
 def get_gemini_active_models(api_key: str) -> list:
-    """Mengambil daftar model yang benar-benar aktif di akun Google Gemini secara dinamis"""
+    """Mengambil daftar model yang aktif di Google Gemini API secara dinamis"""
     clean_key = clean_ascii_str(api_key)
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}"
     try:
@@ -253,7 +257,6 @@ def get_gemini_active_models(api_key: str) -> list:
                     valid_models.append(name)
             
             if valid_models:
-                # Prioritaskan model flash dan versi terbaru
                 flash_models = [m for m in valid_models if "flash" in m.lower()]
                 other_models = [m for m in valid_models if "flash" not in m.lower()]
                 return flash_models + other_models
@@ -296,7 +299,7 @@ def call_ai_engine(prompt: str, key_override: str = None) -> str:
     return call_gemini_api(prompt, key)
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 3) -> list:
-    style_inst = STYLE_PROMPTS.get(style_choice, STYLE_PROMPTS["🔥 Racun Shopee & Spill Diskon (Alami / Gaul)"])
+    style_inst = STYLE_PROMPTS.get(style_choice, STYLE_PROMPTS["🎲 Diserahkan ke AI (AI Bebas Memilih Tone Terbaik)"])
     len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
     
     prompt = (
@@ -742,7 +745,7 @@ with tab_studio:
             p_name = st.text_input("Nama Produk", placeholder="Contoh: ESQA Minimalist Blurring Serum Skin Tint")
             p_link = st.text_input("Link Shopee Affiliate", placeholder="https://s.shopee.co.id/xxxx")
             p_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto.jpg")
-            p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()))
+            p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()), index=0)
         with col_p2:
             p_notes = st.text_area("Catatan / Keunggulan Produk:", placeholder="Ringan, SPF 35, menyamarkan pori...", height=90)
             
