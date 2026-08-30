@@ -39,7 +39,7 @@ def get_config_val(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 def clean_private_key(raw_key: str) -> str:
-    """Membersihkan dan memperbaiki padding Base64 PEM RSA Private Key"""
+    """Membersihkan dan menyusun ulang struktur PEM Private Key"""
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
     lines = [l.strip() for l in raw_key.split("\n") if l.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
@@ -149,13 +149,17 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json"
     }
-    models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
-    last_err = ""
+    models = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+        "deepseek-r1-distill-llama-70b"
+    ]
+    err_list = []
     for m in models:
         payload = {
             "model": m,
             "messages": [
-                {"role": "system", "content": "You are a professional Indonesian Threads affiliate copywriter. Always output valid JSON without markdown wrapping if requested."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.7
@@ -163,16 +167,17 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=25)
             if res.status_code == 200:
-                return res.json()["choices"][0]["message"]["content"].strip()
-            last_err = f"Groq [{m}] HTTP {res.status_code}: {res.text}"
+                data = res.json()
+                return data["choices"][0]["message"]["content"].strip()
+            err_list.append(f"[{m}]: HTTP {res.status_code} - {res.text}")
         except Exception as e:
-            last_err = f"Groq [{m}] Error: {str(e)}"
+            err_list.append(f"[{m}]: {str(e)}")
             continue
-    raise Exception(f"Gagal memanggil Groq AI: {last_err}")
+    raise Exception(" | ".join(err_list))
 
 def call_gemini_rest(prompt: str, api_key: str) -> str:
     models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
-    last_err = ""
+    err_list = []
     for m in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key.strip()}"
         headers = {"Content-Type": "application/json"}
@@ -181,23 +186,22 @@ def call_gemini_rest(prompt: str, api_key: str) -> str:
             res = requests.post(url, headers=headers, json=payload, timeout=25)
             if res.status_code == 200:
                 return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            last_err = f"Gemini [{m}] HTTP {res.status_code}: {res.text}"
+            err_list.append(f"[{m}]: HTTP {res.status_code} - {res.text}")
         except Exception as e:
-            last_err = f"Gemini [{m}] Error: {str(e)}"
+            err_list.append(f"[{m}]: {str(e)}")
             continue
-    raise Exception(f"Gagal memanggil Gemini API: {last_err}")
+    raise Exception(" | ".join(err_list))
 
 def call_ai_engine(prompt: str, key_override: str = None) -> str:
-    key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY", get_config_val("GROQ_API_KEY")))
+    key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
     if not key:
-        raise ValueError("API Key belum disetel! Masukkan Groq Key (gsk_...) atau Gemini Key (AIzaSy...).")
+        raise ValueError("API Key belum disetel!")
 
     if key.startswith("gsk_"):
         return call_groq_api(prompt, key)
     elif key.startswith("AIzaSy"):
         return call_gemini_rest(prompt, key)
     else:
-        # Coba Groq terlebih dahulu, lalu Gemini
         try:
             return call_groq_api(prompt, key)
         except Exception:
@@ -216,7 +220,7 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     - Batasan Panjang Teks: {len_inst}
     - Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).
 
-    Format Output WAJIB JSON murni List of Objects (tanpa penjelasan tambahan):
+    Format Output WAJIB JSON murni List of Objects:
     [
       {{
         "angle": "Sudut Pandang / Variasi",
@@ -421,7 +425,7 @@ class SheetsManager:
         elif os.path.exists(self.creds_path):
             creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
         else:
-            raise FileNotFoundError("Kredensial GCP tidak ditemukan di Secrets maupun credentials.json.")
+            raise FileNotFoundError("Kredensial GCP tidak ditemukan.")
 
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(self.spreadsheet_id)
