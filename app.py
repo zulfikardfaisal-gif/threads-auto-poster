@@ -41,7 +41,7 @@ def get_config_val(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 def clean_private_key(raw_key: str) -> str:
-    """Membersihkan dan menyusun ulang struktur PEM Private Key secara otomatis"""
+    """Membersihkan dan menyusun ulang struktur PEM Private Key"""
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
     lines = [line.strip() for line in raw_key.split("\n") if line.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
@@ -52,13 +52,10 @@ def clean_private_key(raw_key: str) -> str:
 # 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
-    """Membuka atau membuat tab 'Accounts' di Google Sheets"""
     s_id = get_config_val("SPREADSHEET_ID")
     c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
-    
     if not s_id:
         return None
-        
     try:
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
@@ -78,7 +75,6 @@ def get_accounts_worksheet():
 
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(s_id)
-        
         try:
             return spreadsheet.worksheet("Accounts")
         except gspread.WorksheetNotFound:
@@ -90,7 +86,6 @@ def get_accounts_worksheet():
         return None
 
 def load_accounts() -> list:
-    """Membaca akun permanen dari Google Sheets (tab Accounts)"""
     ws = get_accounts_worksheet()
     if ws:
         try:
@@ -108,15 +103,13 @@ def load_accounts() -> list:
     return []
 
 def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
-    """Menyimpan akun baru secara permanen ke Google Sheets"""
     ws = get_accounts_worksheet()
     if ws:
         ws.append_row([str(name).strip(), str(user_id).strip(), str(access_token).strip()])
     else:
-        raise Exception("Gagal terhubung ke Google Sheets untuk menyimpan akun.")
+        raise Exception("Gagal terhubung ke Google Sheets.")
 
 def delete_account_from_sheets(name: str):
-    """Menghapus akun dari Google Sheets"""
     ws = get_accounts_worksheet()
     if ws:
         records = ws.get_all_records()
@@ -126,15 +119,21 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. AI GENERATOR ENGINE (GEMINI REST API)
+# 3. AI GENERATOR ENGINE
 # ==========================================
 STYLE_PROMPTS = {
-    "🤖 Otomatis (AI Pintar Memilih)": "Analisis produk ini dan pilih gaya terbaik yang paling relevan.",
-    "📖 Storytelling / Curhat Personal": "Gunakan sudut pandang orang pertama (pengalaman pribadi/curhat santai). Alur: masalah yang dialami -> momen nemu produk -> hasil nyata -> kepuasan.",
-    "🔥 Spill Racun Diskon & FOMO": "Gaya bersemangat, racun shopee, fokus ke diskon, voucher terbatas, dan mendesak audiens segera checkout.",
-    "🧐 Review Edukatif & Bedah Fitur": "Gaya objektif, bedah bahan/spesifikasi, perbandingan kualitas, tips cara pakai, dan alasan worth it.",
-    "✨ Aesthetic & Lifestyle Vibe": "Gaya santai, estetik, hangat, fokus pada visual dan kenyamanan gaya hidup.",
-    "🤣 Humor & Bahasa Gaul Santai": "Gaya santai khas linimasa Threads Indonesia, sedikit bercanda/relatable, dan memicu komentar netizen."
+    "🤖 Otomatis (AI Pintar Memilih)": "Analisis produk ini dan tentukan gaya paling menjual.",
+    "📖 Storytelling / Curhat Personal": "Gunakan sudut pandang orang pertama (pengalaman pribadi/curhat santai).",
+    "🔥 Spill Racun Diskon & FOMO": "Gaya bersemangat, racun Shopee, fokus ke diskon, voucher dan urgensi.",
+    "🧐 Review Edukatif & Bedah Fitur": "Gaya objektif, bedah spesifikasi, kualitas, dan alasan worth it.",
+    "✨ Aesthetic & Lifestyle Vibe": "Gaya santai, estetik, hangat, fokus pada visual kenyamanan.",
+    "🤣 Humor & Bahasa Gaul Santai": "Gaya santai linimasa Threads Indonesia, sedikit bercanda/relatable."
+}
+
+LENGTH_CONSTRAINTS = {
+    "Pendek (Punchy / 100-180 Karakter)": "Maksimal 180 karakter per postingan/balasan, to the point dan padat.",
+    "Sedang (Standar / 200-350 Karakter)": "Antara 200 hingga 350 karakter per postingan/balasan, penjelasan mengalir.",
+    "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per postingan/balasan (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
 def get_available_gemini_models(api_key: str) -> list:
@@ -152,38 +151,18 @@ def get_available_gemini_models(api_key: str) -> list:
                         valid_models.append(m_id)
             return valid_models
     except Exception as e:
-        logger.warning(f"Gagal mengambil model: {e}")
+        logger.warning(f"Gagal deteksi model: {e}")
     return []
 
 def call_gemini_api_direct(prompt: str) -> str:
     api_key = get_config_val("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY belum disetel! Masukkan di Secrets.")
+        raise ValueError("GEMINI_API_KEY belum disetel!")
 
     active_models = get_available_gemini_models(api_key)
-    priority_order = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-flash-latest",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash-exp",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash",
-        "gemini-pro"
-    ]
-    
-    ordered_models = []
-    for p in priority_order:
-        if p in active_models and p not in ordered_models:
-            ordered_models.append(p)
-    for m in active_models:
-        if m not in ordered_models:
-            ordered_models.append(m)
+    priority_order = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash"]
+    ordered_models = [p for p in priority_order if p in active_models] or priority_order
 
-    if not ordered_models:
-        ordered_models = priority_order
-
-    last_error = ""
     for model_name in ordered_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
@@ -196,72 +175,81 @@ def call_gemini_api_direct(prompt: str) -> str:
             if res.status_code == 200:
                 data = res.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            else:
-                last_error = f"Model '{model_name}' (HTTP {res.status_code}): {res.text}"
-                continue
-        except Exception as e:
-            last_error = f"Model '{model_name}': {str(e)}"
+        except Exception:
             continue
+    raise Exception("Gagal memanggil API Gemini.")
 
-    raise Exception(f"Gagal generate konten dengan Gemini. Detail: {last_error}")
-
-def generate_single_thread(product_name: str, product_notes: str, affiliate_link: str, style_choice: str) -> dict:
-    style_instruction = STYLE_PROMPTS.get(style_choice, STYLE_PROMPTS["🤖 Otomatis (AI Pintar Memilih)"])
+def generate_single_product_thread(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int) -> dict:
+    style_inst = STYLE_PROMPTS.get(style_choice, "")
+    len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 400 karakter.")
+    
     prompt = f"""
     Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia & Shopee Affiliate.
-    Buatkan 1 Utas (Thread) bersambung yang terdiri dari 1 Post Utama dan 4 Balasan Rantai yang saling menyambung.
-
-    Informasi Produk:
+    Buatkan konten Threads untuk:
     - Nama Produk: {product_name}
-    - Catatan/Spesifikasi: {product_notes if product_notes else "Produk viral, berkualitas, banyak dibeli"}
-    - Link Affiliate: {affiliate_link}
+    - Catatan/Kelebihan: {product_notes if product_notes else "Produk viral terlaris"}
+    - Gaya: {style_inst}
+    - Aturan Panjang: {len_inst}
+    - Jumlah Balasan (Reply): {reply_count} balasan (di luar post utama).
 
-    Gaya Penulisan: {style_instruction}
+    STRUKTUR:
+    - "main_text": Hook pembuka menarik.
+    - "replies": Array/List berisi {reply_count} string balasan berantai yang menyambung.
 
-    STRUKTUR UTAS WAJIB:
-    - "main_text": Hook pembuka menarik (Maks 450 karakter).
-    - "reply_1": Poin pembuka/kelanjutan hook (Maks 450 karakter).
-    - "reply_2": Detail spesifikasi/pengalaman nyata (Maks 450 karakter).
-    - "reply_3": Tips varian/alasan wajib punya (Maks 450 karakter).
-    - "reply_4": Info urgensi promo/penutup sebelum link (Maks 450 karakter).
-
-    Format Output WAJIB JSON murni:
+    Output WAJIB format JSON murni:
     {{
       "main_text": "...",
-      "reply_1": "...",
-      "reply_2": "...",
-      "reply_3": "...",
-      "reply_4": "..."
+      "replies": ["..."]
     }}
     """
     raw_text = call_gemini_api_direct(prompt)
     match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-    return json.loads(match.group(0) if match else raw_text)
+    data = json.loads(match.group(0) if match else raw_text)
+    
+    # Pengaturan penempatan Link Affiliate
+    if reply_count == 0:
+        if affiliate_link:
+            data["main_text"] = f"{data.get('main_text', '')}\n\n👉 Beli di Shopee: {affiliate_link}"
+        data["replies"] = []
+    else:
+        replies = data.get("replies", [])[:reply_count]
+        if affiliate_link:
+            cta = f"👉 Beli di Shopee: {affiliate_link}"
+            if len(replies) > 0:
+                replies[-1] = f"{replies[-1]}\n\n{cta}"
+            else:
+                replies.append(cta)
+        data["replies"] = replies
+        
+    return data
 
-def generate_bulk_threads(product_name: str, product_notes: str, affiliate_link: str, count: int = 5) -> list:
+def generate_curated_listicle_thread(curation_topic: str, items: list, length_choice: str) -> dict:
+    """Membuat utas kurasi Top N produk, masing-masing dengan link uniknya"""
+    len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
+    items_text = "\n".join([f"- Item #{i+1}: {it['name']} | Spesifikasi: {it['desc']} | Link: {it['link']}" for i, it in enumerate(items)])
+    
     prompt = f"""
-    Bertindaklah sebagai Copywriter Top Tier & Strategist Shopee Affiliate di Threads Indonesia.
-    Buatkan {count} buah konten Utas (Thread) yang BERBEDA TOTAL GAYA & SUDUT PANDANG untuk produk:
+    Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia.
+    Buatkan 1 Utas Kurasi Rekomendasi/Top List bertema: "{curation_topic}".
+    
+    Daftar Produk yang Wajib Dimasukkan:
+    {items_text}
+    
+    Instruksi:
+    - "main_text": Hook pembuka daftar rekomendasi yang bikin penasaran ({len_inst}).
+    - "replies": Array/List di mana setiap elemen HANYA membahas 1 Item secara berurutan ({len_inst}), lalu diakhiri link pembelian masing-masing.
 
-    Data Produk:
-    - Nama Produk: {product_name}
-    - Catatan/Spesifikasi: {product_notes if product_notes else "Produk viral, kualitas terbaik, terlaris"}
-    - Link Affiliate: {affiliate_link}
-
-    Format Output WAJIB JSON murni List of Objects:
-    [
-      {{
-        "style_name": "Gaya Konten (misal: Storytelling)",
-        "main_text": "...",
-        "reply_1": "...",
-        "reply_2": "...",
-        "reply_3": "...",
-        "reply_4": "..."
-      }}
-    ]
+    Output WAJIB format JSON murni:
+    {{
+      "main_text": "...",
+      "replies": [
+        "Ulasan Item 1...\\n\\n👉 Link Shopee: ...",
+        "Ulasan Item 2...\\n\\n👉 Link Shopee: ..."
+      ]
+    }}
     """
     raw_text = call_gemini_api_direct(prompt)
-    match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
     return json.loads(match.group(0) if match else raw_text)
 
 # ==========================================
@@ -287,10 +275,9 @@ class ThreadsAPI:
             try:
                 res = requests.get(url, params=params, timeout=15)
                 data = res.json()
-                status = data.get("status")
-                if status == "FINISHED":
+                if data.get("status") == "FINISHED":
                     return True
-                elif status == "ERROR":
+                elif data.get("status") == "ERROR":
                     raise Exception(f"Container Error: {data.get('error_message')}")
                 time.sleep(delay)
             except Exception as e:
@@ -304,9 +291,7 @@ class ThreadsAPI:
         payload = {"access_token": self.access_token}
 
         if text:
-            if len(text) > 500:
-                raise ValueError("Teks Threads melebihi batas 500 karakter!")
-            payload["text"] = text
+            payload["text"] = text[:500]
 
         if image_url and str(image_url).strip().startswith(("http://", "https://")):
             payload["media_type"] = "IMAGE"
@@ -319,7 +304,6 @@ class ThreadsAPI:
 
         res = requests.post(url, data=payload, timeout=20)
         res_data = res.json()
-
         if "id" in res_data:
             return res_data["id"]
         else:
@@ -330,10 +314,8 @@ class ThreadsAPI:
         self._wait_for_container(container_id)
         url = f"{self.BASE_URL}/{self.user_id}/threads_publish"
         payload = {"creation_id": container_id, "access_token": self.access_token}
-
         res = requests.post(url, data=payload, timeout=20)
         res_data = res.json()
-
         if "id" in res_data:
             return res_data["id"]
         else:
@@ -348,10 +330,11 @@ class ThreadsAPI:
         published_ids.append(current_parent_id)
 
         if replies:
-            valid_replies = [r.strip() for r in replies if r.strip()][:5]
-            for r_text in valid_replies:
+            for r_text in replies:
+                if not str(r_text).strip():
+                    continue
                 time.sleep(3)
-                r_cid = self.create_container(text=r_text, reply_to_id=current_parent_id)
+                r_cid = self.create_container(text=r_text.strip(), reply_to_id=current_parent_id)
                 time.sleep(2)
                 r_id = self.publish_container(r_cid)
                 published_ids.append(r_id)
@@ -359,9 +342,20 @@ class ThreadsAPI:
 
         return published_ids
 
-def broadcast_post(accounts: list, main_text: str, image_url: str = None, replies: list = None) -> list:
+def broadcast_post(all_registered_accounts: list, target_account_str: str, main_text: str, image_url: str = None, replies: list = None) -> list:
+    """Memfilter akun target (spesifik niche atau ALL) lalu mengeksekusi postingan"""
+    target_str = str(target_account_str).strip()
+    if target_str == "ALL" or not target_str:
+        selected_accounts = all_registered_accounts
+    else:
+        target_names = [t.strip() for t in target_str.split(",") if t.strip()]
+        selected_accounts = [a for a in all_registered_accounts if a.get("name") in target_names]
+
+    if not selected_accounts:
+        return [{"name": target_str, "success": False, "post_ids": [], "error": "Akun target tidak ditemukan"}]
+
     results = []
-    for acc in accounts:
+    for acc in selected_accounts:
         name = acc.get("name", "Unknown")
         uid = acc.get("user_id")
         tok = acc.get("access_token")
@@ -369,10 +363,10 @@ def broadcast_post(accounts: list, main_text: str, image_url: str = None, replie
             client = ThreadsAPI(uid, tok)
             post_ids = client.post_thread_cascade(main_text, image_url, replies)
             results.append({"name": name, "success": True, "post_ids": post_ids, "error": ""})
-            logger.info(f"✅ Post berhasil ke '{name}' (IDs: {post_ids})")
+            logger.info(f"✅ Post terbit di '{name}' (IDs: {post_ids})")
         except Exception as e:
             results.append({"name": name, "success": False, "post_ids": [], "error": str(e)})
-            logger.error(f"❌ Post gagal ke '{name}': {e}")
+            logger.error(f"❌ Post gagal di '{name}': {e}")
     return results
 
 # ==========================================
@@ -381,7 +375,7 @@ def broadcast_post(accounts: list, main_text: str, image_url: str = None, replie
 class SheetsManager:
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     HEADERS = [
-        "schedule_date", "schedule_time", "main_text", "main_image_url",
+        "schedule_date", "schedule_time", "target_accounts", "main_text", "main_image_url",
         "reply_text", "affiliate_link", "status", "posted_at", "threads_post_id", "error_log"
     ]
 
@@ -406,12 +400,17 @@ class SheetsManager:
         elif os.path.exists(self.creds_path):
             creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
         else:
-            raise FileNotFoundError("Kredensial GCP tidak ditemukan di Secrets maupun file lokal.")
+            raise FileNotFoundError("Kredensial GCP tidak ditemukan.")
 
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(self.spreadsheet_id)
         try:
-            return spreadsheet.worksheet(self.sheet_name)
+            ws = spreadsheet.worksheet(self.sheet_name)
+            # Pastikan header kolom target_accounts tersedia
+            row1 = ws.row_values(1)
+            if "target_accounts" not in row1:
+                ws.insert_cols([["target_accounts"]], col=3)
+            return ws
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=self.sheet_name, rows=100, cols=15)
             ws.append_row(self.HEADERS)
@@ -432,6 +431,7 @@ class SheetsManager:
         ordered_vals = [
             row_data.get("schedule_date", ""),
             row_data.get("schedule_time", ""),
+            row_data.get("target_accounts", "ALL"),
             row_data.get("main_text", ""),
             row_data.get("main_image_url", ""),
             row_data.get("reply_text", ""),
@@ -449,6 +449,7 @@ class SheetsManager:
             rows_to_insert.append([
                 r.get("schedule_date", ""),
                 r.get("schedule_time", ""),
+                r.get("target_accounts", "ALL"),
                 r.get("main_text", ""),
                 r.get("main_image_url", ""),
                 r.get("reply_text", ""),
@@ -498,25 +499,19 @@ def run_scheduler_job():
                 sched_dt = TZ_JAKARTA.localize(datetime.strptime(f"{d_str} {t_str}", "%Y-%m-%d %H:%M"))
             except Exception as e:
                 sheets.update_cell_value(row_num, "status", "FAILED")
-                sheets.update_cell_value(row_num, "error_log", f"Format Salah: {e}")
+                sheets.update_cell_value(row_num, "error_log", f"Format Tanggal Salah: {e}")
                 continue
 
             if now >= sched_dt:
-                logger.info(f"[SCHEDULER] ⏳ Memproses baris #{row_num}...")
+                logger.info(f"[SCHEDULER] ⏳ Mengeksekusi baris #{row_num}...")
                 main_txt = str(row["main_text"]).strip()
                 img_url = str(row["main_image_url"]).strip()
                 raw_reply = str(row["reply_text"]).strip()
-                aff_link = str(row["affiliate_link"]).strip()
+                target_acc = str(row.get("target_accounts", "ALL")).strip()
 
                 replies = [r.strip() for r in raw_reply.split("|||") if r.strip()]
-                if aff_link:
-                    cta_link = f"👉 Beli di Shopee: {aff_link}"
-                    if len(replies) < 5:
-                        replies.append(cta_link)
-                    else:
-                        replies[4] = f"{replies[4]}\n\n{cta_link}"
 
-                broadcast_res = broadcast_post(accounts, main_txt, img_url if img_url else None, replies)
+                broadcast_res = broadcast_post(accounts, target_acc, main_txt, img_url if img_url else None, replies)
                 success_list = [f"{r['name']}: {','.join(r['post_ids'])}" for r in broadcast_res if r["success"]]
                 failed_list = [f"{r['name']}: {r['error']}" for r in broadcast_res if not r["success"]]
 
@@ -547,20 +542,19 @@ initialize_background_scheduler()
 # ==========================================
 st.set_page_config(page_title="Threads Shopee Auto-Poster Hub", layout="wide", page_icon="🚀")
 
-st.title("🚀 Threads Multi-Account & AI Batch Generator")
-st.markdown("Otomasi Shopee Affiliate: Batch generator 1 produk ke banyak konten bergaya unik, cascading replies, dan penjadwalan terdistribusi.")
+st.title("🚀 Threads Multi-Account & AI Studio")
+st.markdown("Otomasi Shopee Affiliate: Targeted Niche, Multi-Link Listicle, Panjang Fleksibel, dan Penjadwalan Terpusat.")
 
 active_accounts = load_accounts()
+account_names_list = [a["name"] for a in active_accounts]
 
 # Sidebar
 with st.sidebar:
     st.header("🤖 Engine Status")
     st.success("🟢 Scheduler Aktif (Interval: 2 Menit)")
     st.info(f"👥 Akun Terdaftar: **{len(active_accounts)} Akun**")
-    
     server_time = datetime.now(TZ_JAKARTA).strftime("%Y-%m-%d %H:%M:%S WIB")
     st.write(f"⏰ **Waktu Server:**\n`{server_time}`")
-    
     st.divider()
     if st.button("🔄 Eksekusi Scheduler Sekarang", use_container_width=True):
         with st.spinner("Memproses antrean..."):
@@ -577,171 +571,75 @@ tab_studio, tab_queue, tab_accounts, tab_settings, tab_logs = st.tabs([
 # ----------------------------------------------------
 with tab_studio:
     if not active_accounts:
-        st.warning("⚠️ Belum ada akun Threads terdeteksi. Silakan tambahkan di tab **👥 Multi-Account**.")
-    else:
-        st.caption(f"📢 Target Distribusi: **{len(active_accounts)} Akun** (" + ", ".join([f"`{a['name']}`" for a in active_accounts]) + ")")
+        st.warning("⚠️ Belum ada akun Threads terdaftar. Silakan tambahkan di tab **👥 Multi-Account**.")
+    
+    subtab_single_prod, subtab_curation = st.tabs([
+        "🛍️ Single Produk (Direct / Thread)", 
+        "🏆 Kurasi Multi-Produk (Top 3/5 Rekomendasi + Multi-Link)"
+    ])
 
-    subtab_bulk, subtab_single = st.tabs(["🚀 1 Produk -> Batch Multi-Konten (Auto-Jadwal)", "✍️ Single Post Studio"])
-
-    with subtab_bulk:
-        st.subheader("Otomasi 1 Produk Menjadi Banyak Konten Berbeda Gaya")
+    # ------------------ SUBTAB 1: SINGLE PRODUK ------------------
+    with subtab_single_prod:
+        st.subheader("Buat Postingan 1 Produk (Tentukan Target Akun & Jumlah Reply)")
         
-        col_b1, col_b2 = st.columns([1.2, 1.8])
-        with col_b1:
-            bulk_prod_name = st.text_input("Nama Produk (Bulk)", placeholder="Contoh: Celana Sweatpants Loose Pria")
-            bulk_aff_link = st.text_input("Link Shopee Affiliate (Bulk)", placeholder="https://shope.ee/xxxxx")
-            bulk_img_url = st.text_input("URL Gambar (Opsional, dipakai untuk batch ini)", placeholder="https://domain.com/gambar.jpg")
-            
-        with col_b2:
-            bulk_notes = st.text_area("Catatan / Keunggulan Unik Produk:", placeholder="Misal: Bahan katun fleece adem, potongan loose casual, diskon 40% hari ini...", height=110)
-            
-            col_b_opt1, col_b_opt2, col_b_opt3 = st.columns(3)
-            with col_b_opt1:
-                bulk_count = st.number_input("Jumlah Konten:", min_value=1, max_value=15, value=5, step=1)
-            with col_b_opt2:
-                bulk_interval_hours = st.selectbox(
-                    "Jeda Waktu Antar Post:",
-                    options=[2, 3, 4, 6, 8, 12, 24],
-                    index=2,
-                    format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari (24 Jam)"
-                )
-            with col_b_opt3:
-                bulk_start_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date())
+        c_tgt1, c_tgt2, c_tgt3 = st.columns([1.5, 1, 1])
+        with c_tgt1:
+            target_scope = st.selectbox(
+                "🎯 Target Akun Publikasi:",
+                options=["ALL (Cross-Post Semua Akun)"] + account_names_list,
+                help="Pilih apakah ingin diposting ke semua akun atau akun niche tertentu."
+            )
+            selected_target_str = "ALL" if target_scope.startswith("ALL") else target_scope
+        with c_tgt2:
+            len_choice = st.selectbox("📏 Panjang Postingan:", list(LENGTH_CONSTRAINTS.keys()), index=1)
+        with c_tgt3:
+            rep_choice = st.selectbox("🧵 Jumlah Reply Balasan:", options=[0, 1, 2, 3, 4, 5], index=3, help="Jika 0, link langsung disematkan di postingan utama.")
 
-        if st.button(f"🪄 Generate {bulk_count} Konten Variatif & Siapkan Jadwal", use_container_width=True, type="primary"):
-            if not bulk_prod_name.strip():
+        col_p1, col_p2 = st.columns([1.2, 1.8])
+        with col_p1:
+            p_name = st.text_input("Nama Produk", placeholder="Celana Sweatpants Loose Casual")
+            p_link = st.text_input("Link Shopee Affiliate", placeholder="https://shope.ee/xxxxx")
+            p_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto.jpg")
+            p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()))
+        with col_p2:
+            p_notes = st.text_area("Catatan Tambahan / Keunggulan Produk:", placeholder="Bahan fleece lembut, diskon 50%, ready ukuran jumbo...", height=120)
+            
+            c_d1, c_d2 = st.columns(2)
+            with c_d1:
+                p_date = st.date_input("Tanggal Publikasi:", value=datetime.now(TZ_JAKARTA).date(), key="s_date")
+            with c_d2:
+                p_time = st.time_input("Waktu Publikasi:", value=datetime.now(TZ_JAKARTA).time(), key="s_time")
+
+        if st.button("🪄 Generate Teks dengan AI", use_container_width=True):
+            if not p_name.strip():
                 st.error("Nama produk wajib diisi!")
             else:
-                with st.spinner(f"AI sedang meracik {bulk_count} variasi utas berbeda gaya..."):
+                with st.spinner("AI sedang meracik konten..."):
                     try:
-                        batch_results = generate_bulk_threads(
-                            product_name=bulk_prod_name,
-                            product_notes=bulk_notes,
-                            affiliate_link=bulk_aff_link,
-                            count=bulk_count
-                        )
-                        
-                        scheduled_items = []
-                        start_base_dt = TZ_JAKARTA.localize(datetime.combine(bulk_start_date, datetime.now(TZ_JAKARTA).time()))
-                        
-                        for i, item in enumerate(batch_results):
-                            post_dt = start_base_dt + timedelta(hours=(i * bulk_interval_hours))
-                            raw_replies = [item.get("reply_1", ""), item.get("reply_2", ""), item.get("reply_3", ""), item.get("reply_4", "")]
-                            clean_replies = [r.strip() for r in raw_replies if r.strip()]
-                            
-                            scheduled_items.append({
-                                "schedule_date": post_dt.strftime("%Y-%m-%d"),
-                                "schedule_time": post_dt.strftime("%H:%M"),
-                                "style_name": item.get("style_name", f"Gaya #{i+1}"),
-                                "main_text": item.get("main_text", ""),
-                                "main_image_url": bulk_img_url,
-                                "reply_text": " ||| ".join(clean_replies),
-                                "affiliate_link": bulk_aff_link,
-                                "status": "PENDING"
-                            })
-                        
-                        st.session_state["generated_bulk_list"] = scheduled_items
-                        st.success(f"✅ Berhasil membuat {len(scheduled_items)} konten dengan gaya berbeda!")
+                        gen_res = generate_single_product_thread(p_name, p_notes, p_link, p_style, len_choice, rep_choice)
+                        st.session_state["single_main_txt"] = gen_res.get("main_text", "")
+                        st.session_state["single_replies"] = gen_res.get("replies", [])
+                        st.success("✅ Konten berhasil diracik!")
                     except Exception as e:
-                        st.error(f"Gagal generate bulk konten: {e}")
+                        st.error(f"Gagal generate: {e}")
 
-        if "generated_bulk_list" in st.session_state and st.session_state["generated_bulk_list"]:
-            st.divider()
-            st.markdown(f"#### 📋 Pratinjau {len(st.session_state['generated_bulk_list'])} Konten yang Dihasilkan:")
-            df_preview = pd.DataFrame(st.session_state["generated_bulk_list"])
-            st.dataframe(df_preview[["schedule_date", "schedule_time", "style_name", "main_text", "reply_text"]], use_container_width=True, hide_index=True)
-            
-            if st.button(f"📥 Masukkan Semua ({len(st.session_state['generated_bulk_list'])} Konten) ke Google Sheets", use_container_width=True, type="primary"):
-                try:
-                    s_id = get_config_val("SPREADSHEET_ID")
-                    s_name = get_config_val("SHEET_NAME", "Sheet1")
-                    c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
-                    sheets = SheetsManager(c_json, s_id, s_name)
-                    
-                    sheets.append_rows_batch(st.session_state["generated_bulk_list"])
-                    st.success("🎉 Seluruh konten batch berhasil dimasukkan ke antrean Google Sheets!")
-                    del st.session_state["generated_bulk_list"]
-                    time.sleep(1.5)
-                    st.rerun()
-                except Exception as ex:
-                    st.error(f"Gagal menyimpan ke Google Sheets: {ex}")
-
-    with subtab_single:
-        st.subheader("Buat / Edit 1 Postingan Spesifik")
-        
-        with st.expander("✨ AI Single Generator (Pilih 1 Gaya)", expanded=False):
-            col_ai1, col_ai2 = st.columns([1.2, 1.8])
-            with col_ai1:
-                ai_prod_name = st.text_input("Nama Produk", placeholder="Celana Sweatpants Loose Pria")
-                ai_aff_link = st.text_input("Link Shopee Affiliate", placeholder="https://shope.ee/xxxxx")
-                ai_style_select = st.selectbox("Pilih Gaya / Style:", list(STYLE_PROMPTS.keys()))
-            with col_ai2:
-                ai_notes = st.text_area("Catatan Tambahan:", placeholder="Bahan adem, diskon 50% hari ini...", height=110)
-
-            if st.button("🪄 Generate 1 Utas dengan AI", use_container_width=True):
-                if not ai_prod_name.strip():
-                    st.error("Nama produk wajib diisi!")
-                else:
-                    with st.spinner("Membuat utas..."):
-                        try:
-                            res_ai = generate_single_thread(ai_prod_name, ai_notes, ai_aff_link, ai_style_select)
-                            st.session_state["f_main_text"] = res_ai.get("main_text", "")
-                            st.session_state["f_rep1"] = res_ai.get("reply_1", "")
-                            st.session_state["f_rep2"] = res_ai.get("reply_2", "")
-                            st.session_state["f_rep3"] = res_ai.get("reply_3", "")
-                            st.session_state["f_rep4"] = res_ai.get("reply_4", "")
-                            st.session_state["f_shopee_link"] = ai_aff_link
-                            st.success("✅ Konten terisi di form!")
-                        except Exception as e:
-                            st.error(f"Gagal: {e}")
-
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            post_date = st.date_input("Tanggal Publikasi (Single)", value=datetime.now(TZ_JAKARTA).date())
-        with col_s2:
-            post_time = st.time_input("Waktu Publikasi (Single)", value=datetime.now(TZ_JAKARTA).time())
-
-        col_input, col_preview = st.columns([1.2, 0.8])
-        with col_input:
-            main_content = st.text_area("Teks Postingan Utama (Hook)", value=st.session_state.get("f_main_text", ""), height=110)
-            c_count = len(main_content)
-            st.caption(f"Karakter: {c_count}/500")
-
-            img_url = st.text_input("URL Gambar", placeholder="https://domain.com/gambar.jpg")
-            shopee_url = st.text_input("Link Shopee Affiliate (Single)", value=st.session_state.get("f_shopee_link", ""), placeholder="https://shope.ee/xxxxx")
-
-        with col_preview:
-            st.write("**Pratinjau Gambar:**")
-            if img_url and img_url.strip().startswith(("http://", "https://")):
-                try:
-                    st.image(img_url.strip(), use_container_width=True)
-                except Exception:
-                    st.warning("⚠️ URL gambar tidak valid.")
-            else:
-                st.info("Preview gambar akan tampil di sini.")
-
-        st.markdown("#### 🧵 Rantai Balasan (Maksimal 5)")
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            rep_1 = st.text_input("Balasan 1", value=st.session_state.get("f_rep1", ""))
-            rep_2 = st.text_input("Balasan 2", value=st.session_state.get("f_rep2", ""))
-            rep_3 = st.text_input("Balasan 3", value=st.session_state.get("f_rep3", ""))
-        with col_r2:
-            rep_4 = st.text_input("Balasan 4", value=st.session_state.get("f_rep4", ""))
-            rep_5 = st.text_input("Balasan 5 (Opsional)", placeholder="Penutup tambahan...")
-
-        entered_replies = [r.strip() for r in [rep_1, rep_2, rep_3, rep_4, rep_5] if r.strip()]
-        raw_replies_joined = " ||| ".join(entered_replies)
-
+        # Form Edit Konten
         st.divider()
-        btn_c1, btn_c2 = st.columns(2)
+        edit_main = st.text_area("Postingan Utama (Hook):", value=st.session_state.get("single_main_txt", ""), height=100)
         
-        with btn_c1:
-            if st.button("📥 Jadwalkan 1 Post ke Google Sheets", use_container_width=True, type="primary", disabled=(len(active_accounts) == 0)):
-                if not main_content.strip():
-                    st.error("Teks postingan utama wajib diisi!")
-                elif c_count > 500:
-                    st.error("Teks melebihi 500 karakter!")
+        cur_replies = st.session_state.get("single_replies", [])
+        edit_replies_list = []
+        if cur_replies:
+            st.write(f"**Rantai Balasan ({len(cur_replies)} Reply):**")
+            for idx, r_val in enumerate(cur_replies):
+                edited_r = st.text_input(f"Reply #{idx+1}", value=r_val, key=f"r_inp_{idx}")
+                edit_replies_list.append(edited_r)
+        
+        c_btn1, c_btn2 = st.columns(2)
+        with c_btn1:
+            if st.button("📥 Jadwalkan ke Google Sheets", use_container_width=True, type="primary", disabled=(len(active_accounts) == 0)):
+                if not edit_main.strip():
+                    st.error("Postingan utama tidak boleh kosong!")
                 else:
                     try:
                         s_id = get_config_val("SPREADSHEET_ID")
@@ -750,76 +648,155 @@ with tab_studio:
                         sheets = SheetsManager(c_json, s_id, s_name)
                         
                         sheets.append_row({
-                            "schedule_date": post_date.strftime("%Y-%m-%d"),
-                            "schedule_time": post_time.strftime("%H:%M"),
-                            "main_text": main_content,
-                            "main_image_url": img_url,
-                            "reply_text": raw_replies_joined,
-                            "affiliate_link": shopee_url,
+                            "schedule_date": p_date.strftime("%Y-%m-%d"),
+                            "schedule_time": p_time.strftime("%H:%M"),
+                            "target_accounts": selected_target_str,
+                            "main_text": edit_main,
+                            "main_image_url": p_img,
+                            "reply_text": " ||| ".join(edit_replies_list),
+                            "affiliate_link": p_link,
                             "status": "PENDING"
                         })
-                        st.success("✅ Berhasil dijadwalkan ke Google Sheets!")
+                        st.success("🎉 Berhasil dijadwalkan ke Google Sheets!")
                         time.sleep(1)
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Gagal: {e}")
+                    except Exception as ex:
+                        st.error(f"Gagal simpan ke Sheets: {ex}")
 
-        with btn_c2:
-            if st.button("⚡ Cross-Post Sekarang (Direct)", use_container_width=True, disabled=(len(active_accounts) == 0)):
-                if not main_content.strip():
-                    st.error("Teks postingan utama wajib diisi!")
-                elif c_count > 500:
-                    st.error("Teks melebihi 500 karakter!")
+        with c_btn2:
+            if st.button("⚡ Post Sekarang (Direct)", use_container_width=True, disabled=(len(active_accounts) == 0)):
+                if not edit_main.strip():
+                    st.error("Postingan utama tidak boleh kosong!")
                 else:
                     with st.spinner("Memposting..."):
-                        replies_direct = list(entered_replies)
-                        if shopee_url:
-                            cta_direct = f"👉 Beli di Shopee: {shopee_url}"
-                            if len(replies_direct) < 5:
-                                replies_direct.append(cta_direct)
-                            else:
-                                replies_direct[4] = f"{replies_direct[4]}\n\n{cta_direct}"
-
-                        res_broadcast = broadcast_post(active_accounts, main_content, img_url if img_url else None, replies_direct)
-                        for r in res_broadcast:
+                        b_res = broadcast_post(active_accounts, selected_target_str, edit_main, p_img if p_img else None, edit_replies_list)
+                        for r in b_res:
                             if r["success"]:
                                 st.success(f"✅ Akun **{r['name']}**: Berhasil ({len(r['post_ids'])} post terbit)")
                             else:
                                 st.error(f"❌ Akun **{r['name']}**: Gagal ({r['error']})")
+
+    # ------------------ SUBTAB 2: KURASI TOP LIST (MULTI-LINK) ------------------
+    with subtab_curation:
+        st.subheader("🏆 Buat Utas Kurasi / Rekomendasi (Setiap Reply Berisi Link Berbeda)")
+        
+        c_k1, c_k2, c_k3 = st.columns([1.5, 1, 1])
+        with c_k1:
+            cur_target_scope = st.selectbox(
+                "🎯 Target Akun Kurasi:",
+                options=["ALL (Cross-Post Semua Akun)"] + account_names_list,
+                key="cur_tgt_scope"
+            )
+            cur_selected_target = "ALL" if cur_target_scope.startswith("ALL") else cur_target_scope
+        with c_k2:
+            cur_len_choice = st.selectbox("📏 Panjang Ulasan per Item:", list(LENGTH_CONSTRAINTS.keys()), index=1, key="cur_len")
+        with c_k3:
+            num_items = st.selectbox("📦 Jumlah Produk Rekomendasi:", options=[2, 3, 4, 5], index=1)
+
+        cur_topic = st.text_input("Topik / Judul Kurasi:", placeholder="Contoh: Top 3 Parfum Lokal Pria Wangi Mewah Tahan 12 Jam")
+        cur_img = st.text_input("URL Gambar Utama Utas (Opsional):", placeholder="https://domain.com/foto_parfum.jpg")
+
+        st.markdown("#### 🛍️ Rincian Produk:")
+        items_data = []
+        for i in range(num_items):
+            with st.expander(f"📌 Produk #{i+1}", expanded=True):
+                col_i1, col_i2, col_i3 = st.columns([1.5, 1.5, 2])
+                with col_i1:
+                    it_n = st.text_input(f"Nama Produk #{i+1}", key=f"it_name_{i}", placeholder="Misal: HMNS Farhampton")
+                with col_i2:
+                    it_l = st.text_input(f"Link Shopee Produk #{i+1}", key=f"it_link_{i}", placeholder="https://shope.ee/xxx1")
+                with col_i3:
+                    it_d = st.text_input(f"Kelebihan / Notes Singkat #{i+1}", key=f"it_desc_{i}", placeholder="Wangi hangat elegan, cocok acara malam")
+                items_data.append({"name": it_n, "link": it_l, "desc": it_d})
+
+        c_dt1, c_dt2 = st.columns(2)
+        with c_dt1:
+            cur_date = st.date_input("Tanggal Publikasi Kurasi:", value=datetime.now(TZ_JAKARTA).date(), key="cur_date")
+        with c_dt2:
+            cur_time = st.time_input("Waktu Publikasi Kurasi:", value=datetime.now(TZ_JAKARTA).time(), key="cur_time")
+
+        if st.button("🪄 Generate Utas Kurasi dengan AI", use_container_width=True, type="primary"):
+            if not cur_topic.strip() or any(not it["name"].strip() for it in items_data):
+                st.error("Topik dan semua nama produk wajib diisi!")
+            else:
+                with st.spinner("AI sedang meracik hook dan ulasan per produk..."):
+                    try:
+                        cur_res = generate_curated_listicle_thread(cur_topic, items_data, cur_len_choice)
+                        st.session_state["cur_main_txt"] = cur_res.get("main_text", "")
+                        st.session_state["cur_replies"] = cur_res.get("replies", [])
+                        st.success("✅ Utas Kurasi Berhasil Dibuat!")
+                    except Exception as e:
+                        st.error(f"Gagal: {e}")
+
+        if "cur_main_txt" in st.session_state:
+            st.divider()
+            edit_cur_main = st.text_area("Postingan Utama Kurasi (Hook):", value=st.session_state.get("cur_main_txt", ""), height=90)
+            
+            edit_cur_replies = []
+            for idx, r_val in enumerate(st.session_state.get("cur_replies", [])):
+                e_r = st.text_area(f"Reply #{idx+1} (Ulasan + Link Produk #{idx+1}):", value=r_val, height=80, key=f"cur_r_{idx}")
+                edit_cur_replies.append(e_r)
+
+            if st.button("📥 Jadwalkan Utas Kurasi ke Google Sheets", use_container_width=True, type="primary"):
+                try:
+                    s_id = get_config_val("SPREADSHEET_ID")
+                    s_name = get_config_val("SHEET_NAME", "Sheet1")
+                    c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
+                    sheets = SheetsManager(c_json, s_id, s_name)
+                    
+                    sheets.append_row({
+                        "schedule_date": cur_date.strftime("%Y-%m-%d"),
+                        "schedule_time": cur_time.strftime("%H:%M"),
+                        "target_accounts": cur_selected_target,
+                        "main_text": edit_cur_main,
+                        "main_image_url": cur_img,
+                        "reply_text": " ||| ".join(edit_cur_replies),
+                        "affiliate_link": "Multi-Link Curation",
+                        "status": "PENDING"
+                    })
+                    st.success("🎉 Seluruh utas kurasi berhasil dijadwalkan ke Google Sheets!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Gagal simpan: {ex}")
 
 # ----------------------------------------------------
 # TAB 2: QUEUE & SHEETS
 # ----------------------------------------------------
 with tab_queue:
     st.subheader("Data Antrean & Riwayat Google Sheets")
-    
     s_id = get_config_val("SPREADSHEET_ID")
     c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
     s_name = get_config_val("SHEET_NAME", "Sheet1")
 
     if not s_id:
-        st.warning("⚠️ Konfigurasi Google Sheets belum lengkap di Secrets.")
+        st.warning("⚠️ SPREADSHEET_ID belum terisi di Secrets.")
     else:
         try:
             sheets_client = SheetsManager(c_json, s_id, s_name)
             df_rows = sheets_client.get_all_rows()
 
-            f_status = st.radio("Filter Status:", ["ALL", "PENDING", "POSTED", "PARTIAL", "FAILED"], horizontal=True)
+            col_f1, col_f2 = st.columns([1, 2])
+            with col_f1:
+                f_status = st.radio("Filter Status:", ["ALL", "PENDING", "POSTED", "PARTIAL", "FAILED"], horizontal=True)
+            with col_f2:
+                target_filter = st.selectbox("Filter Target Akun:", ["Semua Target"] + account_names_list + ["ALL"])
+
+            df_view = df_rows.copy()
             if f_status != "ALL":
-                df_view = df_rows[df_rows["status"].astype(str).str.upper() == f_status]
-            else:
-                df_view = df_rows
+                df_view = df_view[df_view["status"].astype(str).str.upper() == f_status]
+            if target_filter != "Semua Target":
+                df_view = df_view[df_view["target_accounts"].astype(str).str.contains(target_filter, na=False)]
 
             st.dataframe(df_view, use_container_width=True, hide_index=True)
 
             st.divider()
             st.write("#### 🛠️ Manajemen Baris")
             row_opts = df_rows["_row_number"].tolist() if not df_rows.empty else []
-            
             if row_opts:
                 c_act1, c_act2, c_act3 = st.columns([1.5, 1, 1])
                 with c_act1:
-                    sel_row = st.selectbox("Pilih Baris:", options=row_opts)
+                    sel_row = st.selectbox("Pilih Nomor Baris:", options=row_opts)
                 with c_act2:
                     if st.button("🔁 Reset ke PENDING", use_container_width=True):
                         sheets_client.update_cell_value(sel_row, "status", "PENDING")
@@ -834,10 +811,10 @@ with tab_queue:
                         time.sleep(1)
                         st.rerun()
         except Exception as e:
-            st.error(f"Gagal memuat data dari Google Sheets: {e}")
+            st.error(f"Gagal memuat Google Sheets: {e}")
 
 # ----------------------------------------------------
-# TAB 3: MULTI-ACCOUNT MANAGEMENT (PERMANEN SHEETS)
+# TAB 3: MULTI-ACCOUNT MANAGEMENT
 # ----------------------------------------------------
 with tab_accounts:
     st.subheader("Daftar Akun Threads Terhubung (Google Sheets)")
@@ -865,7 +842,7 @@ with tab_accounts:
             del_target = st.selectbox("Pilih Akun untuk Dihapus:", options=acc_names)
             if st.button("🗑️ Hapus Akun Terpilih", use_container_width=True):
                 delete_account_from_sheets(del_target)
-                st.success(f"Akun '{del_target}' berhasil dihapus dari Google Sheets.")
+                st.success(f"Akun '{del_target}' berhasil dihapus.")
                 time.sleep(1)
                 st.rerun()
     else:
@@ -874,7 +851,7 @@ with tab_accounts:
     st.divider()
     st.write("#### ➕ Tambah Akun Threads Baru")
     with st.form("add_account_form"):
-        new_acc_name = st.text_input("Label Akun", placeholder="Misal: Akun Fashion / Akun 2")
+        new_acc_name = st.text_input("Label Akun / Niche", placeholder="Misal: fortune.wish (Niche Gadget)")
         new_acc_uid = st.text_input("Threads User ID", placeholder="17841400000000000")
         new_acc_token = st.text_area("Long-Lived Access Token Threads", placeholder="THAAV...")
         
@@ -894,7 +871,7 @@ with tab_accounts:
 # TAB 4: SETTINGS & API KEYS
 # ----------------------------------------------------
 with tab_settings:
-    st.subheader("Konfigurasi API, AI & Google Sheets")
+    st.subheader("Konfigurasi API & AI Generator")
     
     with st.form("config_form"):
         curr_gemini = get_config_val("GEMINI_API_KEY")
@@ -903,7 +880,7 @@ with tab_settings:
 
         val_gemini = st.text_input("Google Gemini API Key", value=curr_gemini, type="password")
         val_s_id = st.text_input("Google Spreadsheet ID", value=curr_s_id)
-        val_s_name = st.text_input("Nama Worksheet / Tab", value=curr_s_name)
+        val_s_name = st.text_input("Nama Worksheet / Tab Jadwal", value=curr_s_name)
 
         if st.form_submit_button("💾 Simpan Konfigurasi ke .env (Lokal)", use_container_width=True):
             if not os.path.exists(ENV_PATH):
@@ -913,21 +890,16 @@ with tab_settings:
             set_key(ENV_PATH, "SHEET_NAME", val_s_name)
             set_key(ENV_PATH, "GOOGLE_CREDS_JSON", "credentials.json")
             load_dotenv(ENV_PATH, override=True)
-            st.success("✅ Seluruh konfigurasi berhasil disimpan!")
+            st.success("✅ Konfigurasi disimpan!")
             st.rerun()
 
     st.divider()
     st.write("#### 🧪 Uji Koneksi AI Gemini")
     if st.button("🔍 Uji Generator Gemini API", use_container_width=True):
-        with st.spinner("Mendeteksi model aktif di akun Google Anda..."):
+        with st.spinner("Mengecek respon AI..."):
             try:
-                curr_k = get_config_val("GEMINI_API_KEY")
-                models_found = get_available_gemini_models(curr_k)
-                if models_found:
-                    st.info(f"📋 Model aktif terdeteksi: `{', '.join(models_found[:4])}`")
-                
-                test_resp = call_gemini_api_direct("Buatkan 1 kalimat sapaan pendek untuk affiliate marketer.")
-                st.success(f"✅ Gemini AI Aktif & Merespons: \"{test_resp}\"")
+                test_resp = call_gemini_api_direct("Halo, buatkan 1 kalimat motivasi affiliate.")
+                st.success(f"✅ Gemini AI Aktif: \"{test_resp}\"")
             except Exception as e_test:
                 st.error(f"❌ Uji Gagal: {e_test}")
 
@@ -944,4 +916,4 @@ with tab_logs:
             log_data = "".join(f.readlines()[-120:])
             st.code(log_data if log_data else "Log masih kosong.", language="log")
     else:
-        st.info("Belum ada log tercatat.")
+        st.info("Belum ada log.")
