@@ -162,7 +162,7 @@ def get_accounts_worksheet():
             return ws
 
         all_v = ws.get_all_values()
-        if not all_v or not all_v[0] or all(not str(x).strip() for x in all_v[0]):
+        if not all_v or not all_v[0] or all_v[0] != ["name", "user_id", "access_token"]:
             ws.update("A1:C1", [["name", "user_id", "access_token"]])
         return ws
     except Exception as e:
@@ -175,14 +175,14 @@ def load_accounts() -> list:
         if ws:
             all_v = ws.get_all_values()
             if len(all_v) > 1:
-                headers = [str(h).strip().lower() for h in all_v[0]]
                 records = []
                 for r in all_v[1:]:
-                    row_dict = {}
-                    for idx, h in enumerate(headers):
-                        row_dict[h] = r[idx] if idx < len(r) else ""
-                    if row_dict.get("user_id"):
-                        records.append(row_dict)
+                    if r and len(r) >= 2 and str(r[1]).strip():
+                        records.append({
+                            "name": str(r[0]).strip(),
+                            "user_id": str(r[1]).strip(),
+                            "access_token": str(r[2]).strip() if len(r) > 2 else ""
+                        })
                 return records
     except Exception as e:
         logger.warning(f"Gagal memuat akun dari Sheets: {e}")
@@ -259,7 +259,6 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b", "gemma2-9b-it"]
 
     err_list = []
-    
     for m in models:
         payload = {
             "model": m,
@@ -526,7 +525,7 @@ def broadcast_post(all_registered_accounts: list, target_account_str: str, main_
     return results
 
 # ==========================================
-# 5. CLIENT MODULE: GOOGLE SHEETS (AUTO-REPAIR HEADER)
+# 5. CLIENT MODULE: GOOGLE SHEETS (STRICT INDEX MAPPING)
 # ==========================================
 class SheetsManager:
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -560,9 +559,7 @@ class SheetsManager:
             return ws
 
         all_v = ws.get_all_values()
-        if not all_v or not all_v[0] or all(not str(x).strip() for x in all_v[0]):
-            ws.update("A1:K1", [self.HEADERS])
-        elif "target_accounts" not in all_v[0]:
+        if not all_v or all_v[0] != self.HEADERS:
             ws.update("A1:K1", [self.HEADERS])
         return ws
 
@@ -571,22 +568,20 @@ class SheetsManager:
         if not all_v or len(all_v) <= 1:
             return pd.DataFrame(columns=self.HEADERS)
         
-        headers = [str(h).strip() for h in all_v[0]]
         rows = all_v[1:]
-        
-        # Susun DataFrame yang aman dari kolom duplikat / kosong
         data_dicts = []
         for r in rows:
+            if not any(str(c).strip() for c in r):
+                continue
             row_dict = {}
-            for idx, h in enumerate(headers):
-                if h:
-                    row_dict[h] = r[idx] if idx < len(r) else ""
+            for idx, h in enumerate(self.HEADERS):
+                row_dict[h] = r[idx] if idx < len(r) else ""
             data_dicts.append(row_dict)
             
+        if not data_dicts:
+            return pd.DataFrame(columns=self.HEADERS)
+            
         df = pd.DataFrame(data_dicts)
-        for col in self.HEADERS:
-            if col not in df.columns:
-                df[col] = ""
         df["_row_number"] = range(2, len(df) + 2)
         return df
 
