@@ -35,7 +35,7 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def get_config_val(key: str, default: str = "") -> str:
-    """Mengambil value konfigurasi dari Streamlit Secrets atau .env lokal"""
+    """Mengambil config dari Streamlit Secrets atau .env lokal"""
     if key in st.secrets:
         return str(st.secrets[key]).strip()
     return os.getenv(key, default).strip()
@@ -141,9 +141,18 @@ LENGTH_CONSTRAINTS = {
 }
 
 def get_available_gemini_models(api_key: str) -> list:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    if not api_key:
+        return []
+    
+    if api_key.startswith("AQ."):
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+    else:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        headers = {"x-goog-api-key": api_key}
+
     try:
-        res = requests.get(url, timeout=15)
+        res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
             valid_models = []
@@ -169,7 +178,6 @@ def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
         "gemini-2.0-flash",
         "gemini-flash-latest",
         "gemini-2.5-pro",
-        "gemini-2.0-flash-exp",
         "gemini-1.5-flash-latest",
         "gemini-1.5-flash",
         "gemini-pro"
@@ -188,8 +196,19 @@ def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
 
     last_error = ""
     for model_name in ordered_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+        if api_key.startswith("AQ."):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+        else:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            headers = {
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json"
+            }
+
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
