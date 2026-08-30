@@ -208,7 +208,7 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. AI ENGINE (GOOGLE GEMINI 2.0 / 1.5 FLASH)
+# 3. AI ENGINE (DYNAMIC GEMINI DISCOVERY)
 # ==========================================
 STYLE_PROMPTS = {
     "🔥 Racun Shopee & Spill Diskon (Alami / Gaul)": (
@@ -237,12 +237,36 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
+def get_gemini_active_models(api_key: str) -> list:
+    """Mengambil daftar model yang benar-benar aktif di akun Google Gemini secara dinamis"""
+    clean_key = clean_ascii_str(api_key)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={clean_key}"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get("models", [])
+            valid_models = []
+            for m in data:
+                name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods and not any(x in name.lower() for x in ["embedding", "imagen", "aqa", "vision"]):
+                    valid_models.append(name)
+            
+            if valid_models:
+                # Prioritaskan model flash dan versi terbaru
+                flash_models = [m for m in valid_models if "flash" in m.lower()]
+                other_models = [m for m in valid_models if "flash" not in m.lower()]
+                return flash_models + other_models
+    except Exception as e:
+        logger.warning(f"Gagal discovery model Gemini: {e}")
+    return ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
 def call_gemini_api(prompt: str, api_key: str) -> str:
     clean_key = clean_ascii_str(api_key)
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    models_to_try = get_gemini_active_models(clean_key)
     err_list = []
     
-    for m in models:
+    for m in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={clean_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -1017,7 +1041,7 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi Generator AI")
     if st.button("🔍 Uji Generator AI Sekarang", use_container_width=True):
-        with st.spinner("Menguji respon Gemini AI..."):
+        with st.spinner("Mengambil model aktif dan menguji respon Gemini..."):
             try:
                 target_key = val_ai_key.strip() if val_ai_key else None
                 test_resp = call_ai_engine("Halo, buatkan 1 kalimat racun affiliate Shopee yang santai dan gaul.", key_override=target_key)
