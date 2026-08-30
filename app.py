@@ -155,11 +155,16 @@ def get_accounts_worksheet():
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(s_id)
         try:
-            return spreadsheet.worksheet("Accounts")
+            ws = spreadsheet.worksheet("Accounts")
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title="Accounts", rows=50, cols=5)
-            ws.append_row(["name", "user_id", "access_token"])
+            ws.update("A1:C1", [["name", "user_id", "access_token"]])
             return ws
+
+        all_v = ws.get_all_values()
+        if not all_v or not all_v[0] or all(not str(x).strip() for x in all_v[0]):
+            ws.update("A1:C1", [["name", "user_id", "access_token"]])
+        return ws
     except Exception as e:
         logger.warning(f"Akses tab Accounts: {e}")
         return None
@@ -168,10 +173,19 @@ def load_accounts() -> list:
     try:
         ws = get_accounts_worksheet()
         if ws:
-            records = ws.get_all_records()
-            return [r for r in records if str(r.get("user_id", "")).strip() != ""]
-    except Exception:
-        pass
+            all_v = ws.get_all_values()
+            if len(all_v) > 1:
+                headers = [str(h).strip().lower() for h in all_v[0]]
+                records = []
+                for r in all_v[1:]:
+                    row_dict = {}
+                    for idx, h in enumerate(headers):
+                        row_dict[h] = r[idx] if idx < len(r) else ""
+                    if row_dict.get("user_id"):
+                        records.append(row_dict)
+                return records
+    except Exception as e:
+        logger.warning(f"Gagal memuat akun dari Sheets: {e}")
             
     try:
         if "ACCOUNTS_JSON" in st.secrets:
@@ -191,9 +205,9 @@ def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
 def delete_account_from_sheets(name: str):
     ws = get_accounts_worksheet()
     if ws:
-        records = ws.get_all_records()
-        for i, r in enumerate(records, start=2):
-            if str(r.get("name", "")).strip() == name:
+        all_v = ws.get_all_values()
+        for i, r in enumerate(all_v[1:], start=2):
+            if r and str(r[0]).strip() == name:
                 ws.delete_rows(i)
                 break
 
@@ -512,7 +526,7 @@ def broadcast_post(all_registered_accounts: list, target_account_str: str, main_
     return results
 
 # ==========================================
-# 5. CLIENT MODULE: GOOGLE SHEETS
+# 5. CLIENT MODULE: GOOGLE SHEETS (AUTO-REPAIR HEADER)
 # ==========================================
 class SheetsManager:
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -540,20 +554,36 @@ class SheetsManager:
         spreadsheet = client.open_by_key(self.spreadsheet_id)
         try:
             ws = spreadsheet.worksheet(self.sheet_name)
-            row1 = ws.row_values(1)
-            if "target_accounts" not in row1:
-                ws.insert_cols([["target_accounts"]], col=3)
-            return ws
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=self.sheet_name, rows=100, cols=15)
-            ws.append_row(self.HEADERS)
+            ws.update("A1:K1", [self.HEADERS])
             return ws
 
+        all_v = ws.get_all_values()
+        if not all_v or not all_v[0] or all(not str(x).strip() for x in all_v[0]):
+            ws.update("A1:K1", [self.HEADERS])
+        elif "target_accounts" not in all_v[0]:
+            ws.update("A1:K1", [self.HEADERS])
+        return ws
+
     def get_all_rows(self) -> pd.DataFrame:
-        data = self.sheet.get_all_records()
-        if not data:
+        all_v = self.sheet.get_all_values()
+        if not all_v or len(all_v) <= 1:
             return pd.DataFrame(columns=self.HEADERS)
-        df = pd.DataFrame(data)
+        
+        headers = [str(h).strip() for h in all_v[0]]
+        rows = all_v[1:]
+        
+        # Susun DataFrame yang aman dari kolom duplikat / kosong
+        data_dicts = []
+        for r in rows:
+            row_dict = {}
+            for idx, h in enumerate(headers):
+                if h:
+                    row_dict[h] = r[idx] if idx < len(r) else ""
+            data_dicts.append(row_dict)
+            
+        df = pd.DataFrame(data_dicts)
         for col in self.HEADERS:
             if col not in df.columns:
                 df[col] = ""
