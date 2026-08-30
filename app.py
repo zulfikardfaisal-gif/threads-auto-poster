@@ -52,14 +52,17 @@ def get_accounts_worksheet():
         return None
         
     try:
-        # 1. Cek Secrets Cloud
-        if "GCP_SERVICE_ACCOUNT" in st.secrets:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
+        elif "GCP_SERVICE_ACCOUNT" in st.secrets:
             raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
-            creds_info = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
-            if "private_key" in creds_info:
-                creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
-            creds = Credentials.from_service_account_info(creds_info, scopes=SheetsManager.SCOPES)
-        # 2. Cek File Lokal
+            creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
         elif os.path.exists(c_json):
             creds = Credentials.from_service_account_file(c_json, scopes=SheetsManager.SCOPES)
         else:
@@ -381,12 +384,20 @@ class SheetsManager:
         self.sheet = self._connect()
 
     def _connect(self):
-        # 1. Cek Secrets Cloud
-        if "GCP_SERVICE_ACCOUNT" in st.secrets:
+        # 1. Cek struktur [gcp_service_account] (TOML Table)
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+            creds = Credentials.from_service_account_info(creds_dict, scopes=self.SCOPES)
+        # 2. Cek format string GCP_SERVICE_ACCOUNT
+        elif "GCP_SERVICE_ACCOUNT" in st.secrets:
             raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
-            creds_info = json.loads(raw_gcp) if isinstance(raw_gcp, str) else raw_gcp
-            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
-        # 2. Cek File Lokal
+            creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+            creds = Credentials.from_service_account_info(creds_dict, scopes=self.SCOPES)
+        # 3. Fallback file lokal laptop
         elif os.path.exists(self.creds_path):
             creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
         else:
