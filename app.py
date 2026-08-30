@@ -33,6 +33,12 @@ logger = logging.getLogger("ThreadsHub")
 load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
+def clean_ascii_str(text: str) -> str:
+    """Membersihkan seluruh karakter tersembunyi / non-ascii"""
+    if not text:
+        return ""
+    return re.sub(r"[^\x20-\x7E]", "", str(text)).strip()
+
 def get_config_val(key: str, default: str = "") -> str:
     if key in st.secrets:
         return str(st.secrets[key]).strip()
@@ -119,7 +125,7 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
 # 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
-    s_id = get_config_val("SPREADSHEET_ID")
+    s_id = clean_ascii_str(get_config_val("SPREADSHEET_ID"))
     creds_dict = get_gcp_credentials_dict()
     if not s_id or not creds_dict:
         return None
@@ -188,27 +194,11 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
-def get_groq_active_models(api_key: str) -> list:
-    url = "[https://api.groq.com/openai/v1/models](https://api.groq.com/openai/v1/models)"
-    headers = {"Authorization": f"Bearer {api_key.strip()}"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json().get("data", [])
-            valid_models = [
-                m["id"] for m in data 
-                if not any(x in m["id"].lower() for x in ["whisper", "guard", "vision", "audio", "embed"])
-            ]
-            if valid_models:
-                return valid_models
-    except Exception:
-        pass
-    return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-
 def call_groq_api(prompt: str, api_key: str) -> str:
-    url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
+    clean_key = clean_ascii_str(api_key)
+    url = clean_ascii_str("https://api.groq.com/openai/v1/chat/completions")
     headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
+        "Authorization": f"Bearer {clean_key}",
         "Content-Type": "application/json"
     }
     models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
@@ -252,10 +242,11 @@ def call_groq_api(prompt: str, api_key: str) -> str:
     raise Exception(f"Gagal memanggil Groq AI: {' | '.join(err_list)}")
 
 def call_gemini_rest(prompt: str, api_key: str) -> str:
+    clean_key = clean_ascii_str(api_key)
     models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
     err_list = []
     for m in models:
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){m}:generateContent?key={api_key.strip()}"
+        url = clean_ascii_str(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={clean_key}")
         headers = {"Content-Type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.7}}
         try:
@@ -269,7 +260,8 @@ def call_gemini_rest(prompt: str, api_key: str) -> str:
     raise Exception(f"Gagal memanggil Gemini: {' | '.join(err_list)}")
 
 def call_ai_engine(prompt: str, key_override: str = None) -> str:
-    key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
+    raw_key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
+    key = clean_ascii_str(raw_key)
     if not key:
         raise ValueError("API Key belum disetel!")
 
@@ -362,20 +354,20 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
 # 4. CLIENT MODULE: THREADS API
 # ==========================================
 class ThreadsAPI:
-    BASE_URL = "[https://graph.threads.net/v1.0](https://graph.threads.net/v1.0)"
+    BASE_URL = "https://graph.threads.net/v1.0"
 
     def __init__(self, user_id: str, access_token: str):
-        self.user_id = str(user_id).strip()
-        self.access_token = str(access_token).strip()
+        self.user_id = clean_ascii_str(user_id)
+        self.access_token = clean_ascii_str(access_token)
 
     def test_connection(self) -> dict:
-        url = f"{self.BASE_URL}/me"
+        url = clean_ascii_str(f"{self.BASE_URL}/me")
         params = {"fields": "id,username,name", "access_token": self.access_token}
         res = requests.get(url, params=params, timeout=15)
         return res.json()
 
     def _wait_for_container(self, container_id: str, max_retries: int = 10, delay: int = 3) -> bool:
-        url = f"{self.BASE_URL}/{container_id}"
+        url = clean_ascii_str(f"{self.BASE_URL}/{container_id}")
         params = {"fields": "status,error_message", "access_token": self.access_token}
         for _ in range(max_retries):
             try:
@@ -393,7 +385,7 @@ class ThreadsAPI:
         return True
 
     def create_container(self, text: str = "", image_url: str = None, reply_to_id: str = None) -> str:
-        url = f"{self.BASE_URL}/{self.user_id}/threads"
+        url = clean_ascii_str(f"{self.BASE_URL}/{self.user_id}/threads")
         payload = {"access_token": self.access_token}
 
         if text:
@@ -406,7 +398,7 @@ class ThreadsAPI:
             payload["media_type"] = "TEXT"
 
         if reply_to_id:
-            payload["reply_to_id"] = reply_to_id
+            payload["reply_to_id"] = clean_ascii_str(reply_to_id)
 
         res = requests.post(url, data=payload, timeout=20)
         res_data = res.json()
@@ -418,7 +410,7 @@ class ThreadsAPI:
 
     def publish_container(self, container_id: str) -> str:
         self._wait_for_container(container_id)
-        url = f"{self.BASE_URL}/{self.user_id}/threads_publish"
+        url = clean_ascii_str(f"{self.BASE_URL}/{self.user_id}/threads_publish")
         payload = {"creation_id": container_id, "access_token": self.access_token}
         res = requests.post(url, data=payload, timeout=20)
         res_data = res.json()
@@ -449,7 +441,7 @@ class ThreadsAPI:
         return published_ids
 
 def broadcast_post(all_registered_accounts: list, target_account_str: str, main_text: str, image_url: str = None, replies: list = None) -> list:
-    target_str = str(target_account_str).strip()
+    target_str = clean_ascii_str(target_account_str)
     if target_str == "ALL" or not target_str:
         selected_accounts = all_registered_accounts
     else:
@@ -478,7 +470,7 @@ def broadcast_post(all_registered_accounts: list, target_account_str: str, main_
 # 5. CLIENT MODULE: GOOGLE SHEETS
 # ==========================================
 class SheetsManager:
-    SCOPES = ["[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)", "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"]
+    SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     HEADERS = [
         "schedule_date", "schedule_time", "target_accounts", "main_text", "main_image_url",
         "reply_text", "affiliate_link", "status", "posted_at", "threads_post_id", "error_log"
@@ -486,8 +478,8 @@ class SheetsManager:
 
     def __init__(self, creds_path: str, spreadsheet_id: str, sheet_name: str = "Sheet1"):
         self.creds_path = creds_path
-        self.spreadsheet_id = spreadsheet_id
-        self.sheet_name = sheet_name
+        self.spreadsheet_id = clean_ascii_str(spreadsheet_id)
+        self.sheet_name = clean_ascii_str(sheet_name)
         self.sheet = self._connect()
 
     def _connect(self):
@@ -692,8 +684,8 @@ with tab_studio:
         col_p1, col_p2 = st.columns([1.2, 1.8])
         with col_p1:
             p_name = st.text_input("Nama Produk", placeholder="Contoh: ESQA Minimalist Blurring Serum Skin Tint")
-            p_link = st.text_input("Link Shopee Affiliate", placeholder="[https://s.shopee.co.id/xxxx](https://s.shopee.co.id/xxxx)")
-            p_img = st.text_input("URL Gambar (Opsional)", placeholder="[https://domain.com/foto.jpg](https://domain.com/foto.jpg)")
+            p_link = st.text_input("Link Shopee Affiliate", placeholder="https://s.shopee.co.id/xxxx")
+            p_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto.jpg")
             p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()))
         with col_p2:
             p_notes = st.text_area("Catatan / Keunggulan Produk:", placeholder="Ringan, SPF 35, menyamarkan pori...", height=90)
@@ -790,7 +782,7 @@ with tab_studio:
             num_items = st.selectbox("📦 Jumlah Produk:", options=[2, 3, 4, 5], index=1)
 
         cur_topic = st.text_input("Topik / Judul Kurasi:", placeholder="Contoh: Top 3 Parfum Pria Wangi Mewah Tahan Seharian")
-        cur_img = st.text_input("URL Gambar Utama Utas (Opsional):", placeholder="[https://domain.com/foto_parfum.jpg](https://domain.com/foto_parfum.jpg)")
+        cur_img = st.text_input("URL Gambar Utama Utas (Opsional):", placeholder="https://domain.com/foto_parfum.jpg")
 
         st.markdown("#### 🛍️ Rincian Produk:")
         items_data = []
@@ -800,7 +792,7 @@ with tab_studio:
                 with col_i1:
                     it_n = st.text_input(f"Nama Produk #{i+1}", key=f"it_name_{i}", placeholder="Misal: HMNS Farhampton")
                 with col_i2:
-                    it_l = st.text_input(f"Link Shopee Produk #{i+1}", key=f"it_link_{i}", placeholder="[https://shope.ee/xxx1](https://shope.ee/xxx1)")
+                    it_l = st.text_input(f"Link Shopee Produk #{i+1}", key=f"it_link_{i}", placeholder="https://shope.ee/xxx1")
                 with col_i3:
                     it_d = st.text_input(f"Kelebihan Singkat #{i+1}", key=f"it_desc_{i}", placeholder="Aroma warm spicy berkelas")
                 items_data.append({"name": it_n, "link": it_l, "desc": it_d})
