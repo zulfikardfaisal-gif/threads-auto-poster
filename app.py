@@ -11,7 +11,6 @@ import streamlit as st
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
-import google.auth.transport.requests
 from dotenv import load_dotenv, set_key
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -45,12 +44,9 @@ def clean_private_key(raw_key: str) -> str:
     lines = [l.strip() for l in raw_key.split("\n") if l.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
     body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
-    
-    # Perbaiki kelipatan base64
     rem = len(body) % 4
     if rem > 0:
         body += "=" * (4 - rem)
-
     chunks = [body[i:i+64] for i in range(0, len(body), 64)]
     return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
 
@@ -149,44 +145,63 @@ LENGTH_CONSTRAINTS = {
 
 def call_groq_api(prompt: str, api_key: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "You are a professional social media affiliate copywriter specialized in Indonesian language Threads."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json"
     }
-    res = requests.post(url, headers=headers, json=payload, timeout=25)
-    if res.status_code == 200:
-        return res.json()["choices"][0]["message"]["content"].strip()
-    raise Exception(f"Groq API Error ({res.status_code}): {res.text}")
+    models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+    last_err = ""
+    for m in models:
+        payload = {
+            "model": m,
+            "messages": [
+                {"role": "system", "content": "You are a professional Indonesian Threads affiliate copywriter. Always output valid JSON without markdown wrapping if requested."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7
+        }
+        try:
+            res = requests.post(url, headers=headers, json=payload, timeout=25)
+            if res.status_code == 200:
+                return res.json()["choices"][0]["message"]["content"].strip()
+            last_err = f"Groq [{m}] HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = f"Groq [{m}] Error: {str(e)}"
+            continue
+    raise Exception(f"Gagal memanggil Groq AI: {last_err}")
 
 def call_gemini_rest(prompt: str, api_key: str) -> str:
     models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+    last_err = ""
     for m in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
-        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key.strip()}"
+        headers = {"Content-Type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.7}}
-        res = requests.post(url, headers=headers, json=payload, timeout=25)
-        if res.status_code == 200:
-            return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raise Exception(f"Gemini API Error: {res.text}")
+        try:
+            res = requests.post(url, headers=headers, json=payload, timeout=25)
+            if res.status_code == 200:
+                return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            last_err = f"Gemini [{m}] HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = f"Gemini [{m}] Error: {str(e)}"
+            continue
+    raise Exception(f"Gagal memanggil Gemini API: {last_err}")
 
 def call_ai_engine(prompt: str, key_override: str = None) -> str:
-    key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY"))
-    
+    key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY", get_config_val("GROQ_API_KEY")))
+    if not key:
+        raise ValueError("API Key belum disetel! Masukkan Groq Key (gsk_...) atau Gemini Key (AIzaSy...).")
+
     if key.startswith("gsk_"):
         return call_groq_api(prompt, key)
     elif key.startswith("AIzaSy"):
         return call_gemini_rest(prompt, key)
-    elif key:
+    else:
+        # Coba Groq terlebih dahulu, lalu Gemini
         try:
             return call_groq_api(prompt, key)
         except Exception:
             return call_gemini_rest(prompt, key)
-    raise ValueError("API Key AI belum disetel. Masukkan Groq API Key (gsk_...) atau Gemini API Key (AIzaSy...).")
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 5) -> list:
     style_inst = STYLE_PROMPTS.get(style_choice, "")
@@ -201,10 +216,10 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     - Batasan Panjang Teks: {len_inst}
     - Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).
 
-    Format Output WAJIB JSON murni List of Objects tanpa formatting markdown backticks:
+    Format Output WAJIB JSON murni List of Objects (tanpa penjelasan tambahan):
     [
       {{
-        "angle": "Sudut Pandang / Variasi (misal: Racun Diskon / Solusi Masalah)",
+        "angle": "Sudut Pandang / Variasi",
         "main_text": "Teks post utama hook ({len_inst})",
         "replies": ["Teks balasan 1 ({len_inst})", "Teks balasan 2 ({len_inst})"]
       }}
@@ -880,7 +895,7 @@ with tab_settings:
     st.subheader("Konfigurasi API & AI Generator")
     
     with st.form("config_form"):
-        curr_ai_key = get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY"))
+        curr_ai_key = get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
         curr_s_id = get_config_val("SPREADSHEET_ID")
         curr_s_name = get_config_val("SHEET_NAME", "Sheet1")
 
@@ -892,6 +907,7 @@ with tab_settings:
             if not os.path.exists(ENV_PATH):
                 open(ENV_PATH, "w").close()
             set_key(ENV_PATH, "AI_API_KEY", val_ai_key)
+            set_key(ENV_PATH, "GROQ_API_KEY", val_ai_key)
             set_key(ENV_PATH, "GEMINI_API_KEY", val_ai_key)
             set_key(ENV_PATH, "SPREADSHEET_ID", val_s_id)
             set_key(ENV_PATH, "SHEET_NAME", val_s_name)
@@ -903,7 +919,7 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi Generator AI")
     if st.button("🔍 Uji Generator AI Sekarang", use_container_width=True):
-        with st.spinner("Mengecek respon AI..."):
+        with st.spinner("Mengecek respon AI Engine..."):
             try:
                 target_key = val_ai_key.strip() if val_ai_key else None
                 test_resp = call_ai_engine("Halo, buatkan 1 kalimat motivasi affiliate pendek.", key_override=target_key)
