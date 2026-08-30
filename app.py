@@ -34,19 +34,37 @@ logger = logging.getLogger("ThreadsHub")
 load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
+def get_config_val(key: str, default: str = "") -> str:
+    """Mengambil config dari Streamlit Secrets atau .env lokal"""
+    if key in st.secrets:
+        return str(st.secrets[key]).strip()
+    return os.getenv(key, default).strip()
+
 # ==========================================
-# 2. HELPER DATA MULTI-AKUN
+# 2. HELPER DATA MULTI-AKUN (SECRETS + LOKAL)
 # ==========================================
 def load_accounts() -> list:
-    if not os.path.exists(ACCOUNTS_FILE):
-        return []
-    try:
-        with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    """Membaca akun dari Secrets Cloud secara permanen atau dari accounts.json lokal"""
+    if "ACCOUNTS_JSON" in st.secrets:
+        try:
+            val = st.secrets["ACCOUNTS_JSON"]
+            if isinstance(val, str):
+                return json.loads(val)
+            elif isinstance(val, list):
+                return val
+        except Exception as e:
+            logger.error(f"Error parsing ACCOUNTS_JSON secrets: {e}")
+
+    if os.path.exists(ACCOUNTS_FILE):
+        try:
+            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
 
 def save_accounts(accounts: list):
+    """Menyimpan data akun ke file lokal accounts.json"""
     with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
         json.dump(accounts, f, indent=2, ensure_ascii=False)
 
@@ -63,7 +81,6 @@ STYLE_PROMPTS = {
 }
 
 def get_available_gemini_models(api_key: str) -> list:
-    """Mengambil daftar model yang aktif langsung dari Google AI Studio untuk API key ini"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         res = requests.get(url, timeout=15)
@@ -78,19 +95,15 @@ def get_available_gemini_models(api_key: str) -> list:
                         valid_models.append(m_id)
             return valid_models
     except Exception as e:
-        logger.warning(f"Gagal mengambil daftar model otomatis: {e}")
+        logger.warning(f"Gagal mengambil model: {e}")
     return []
 
 def call_gemini_api_direct(prompt: str) -> str:
-    """Memanggil Google Gemini API dengan auto-discovery model yang aktif"""
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = get_config_val("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY belum disetel! Masukkan API Key di tab Konfigurasi & AI Key.")
+        raise ValueError("GEMINI_API_KEY belum disetel! Masukkan di Secrets atau tab Konfigurasi.")
 
-    # 1. Deteksi model aktif dari akun Google user
     active_models = get_available_gemini_models(api_key)
-    
-    # Urutan prioritas model
     priority_order = [
         "gemini-2.5-flash",
         "gemini-2.0-flash",
@@ -99,7 +112,6 @@ def call_gemini_api_direct(prompt: str) -> str:
         "gemini-2.0-flash-exp",
         "gemini-1.5-flash-latest",
         "gemini-1.5-flash",
-        "gemini-1.5-pro",
         "gemini-pro"
     ]
     
@@ -117,27 +129,16 @@ def call_gemini_api_direct(prompt: str) -> str:
     last_error = ""
     for model_name in ordered_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key
-        }
+        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
         payload = {
-            "contents": [
-                {
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 2500
-            }
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2500}
         }
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=30)
             if res.status_code == 200:
                 data = res.json()
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                return text.strip()
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
             else:
                 last_error = f"Model '{model_name}' (HTTP {res.status_code}): {res.text}"
                 continue
@@ -145,11 +146,10 @@ def call_gemini_api_direct(prompt: str) -> str:
             last_error = f"Model '{model_name}': {str(e)}"
             continue
 
-    raise Exception(f"Gagal generate konten dengan seluruh model Gemini. Detail: {last_error}")
+    raise Exception(f"Gagal generate konten dengan Gemini. Detail: {last_error}")
 
 def generate_single_thread(product_name: str, product_notes: str, affiliate_link: str, style_choice: str) -> dict:
     style_instruction = STYLE_PROMPTS.get(style_choice, STYLE_PROMPTS["🤖 Otomatis (AI Pintar Memilih)"])
-
     prompt = f"""
     Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia & Shopee Affiliate.
     Buatkan 1 Utas (Thread) bersambung yang terdiri dari 1 Post Utama dan 4 Balasan Rantai yang saling menyambung.
@@ -167,7 +167,6 @@ def generate_single_thread(product_name: str, product_notes: str, affiliate_link
     - "reply_2": Detail spesifikasi/pengalaman nyata (Maks 450 karakter).
     - "reply_3": Tips varian/alasan wajib punya (Maks 450 karakter).
     - "reply_4": Info urgensi promo/penutup sebelum link (Maks 450 karakter).
-    *Catatan: Balasan ke-5 otomatis diisi link Shopee oleh sistem, jadi JANGAN masukkan link di reply 1-4.*
 
     Format Output WAJIB JSON murni:
     {{
@@ -180,38 +179,19 @@ def generate_single_thread(product_name: str, product_notes: str, affiliate_link
     """
     raw_text = call_gemini_api_direct(prompt)
     match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-    json_str = match.group(0) if match else raw_text
-    return json.loads(json_str)
+    return json.loads(match.group(0) if match else raw_text)
 
 def generate_bulk_threads(product_name: str, product_notes: str, affiliate_link: str, count: int = 5) -> list:
     prompt = f"""
     Bertindaklah sebagai Copywriter Top Tier & Strategist Shopee Affiliate di Threads Indonesia.
-    Buatkan {count} buah konten Utas (Thread) yang BERBEDA TOTAL GAYA & SUDUT PANDANG untuk produk berikut:
+    Buatkan {count} buah konten Utas (Thread) yang BERBEDA TOTAL GAYA & SUDUT PANDANG untuk produk:
 
     Data Produk:
     - Nama Produk: {product_name}
     - Catatan/Spesifikasi: {product_notes if product_notes else "Produk viral, kualitas terbaik, terlaris"}
     - Link Affiliate: {affiliate_link}
 
-    VARIASIKAN gaya setiap konten secara unik dari daftar sudut pandang berikut:
-    1. Storytelling / Pengalaman pribadi curhat santai
-    2. Spill Racun Hard-Selling & Urgensi Diskon Terbatas
-    3. Review Edukatif & Bedah Spesifikasi Teknis
-    4. Aesthetic & Rekomendasi Lifestyle
-    5. Humor, Satir Ringan & Bahasa Gaul Threads
-    6. Problem-Solution (Solusi Masalah Sehari-hari)
-    7. Tips, Trik & Cara Maksimalkan Pemakaian
-    8. Unfiltered Honest Review (Kenapa produk ini worth it)
-
-    ATURAN TIAP UTAS:
-    - "main_text": Hook pembuka unik (Maks 450 karakter).
-    - "reply_1": Poin 1 (Maks 450 karakter).
-    - "reply_2": Poin 2 (Maks 450 karakter).
-    - "reply_3": Poin 3 (Maks 450 karakter).
-    - "reply_4": Poin 4 (Maks 450 karakter).
-    *JANGAN masukkan link affiliate di reply 1-4.*
-
-    Format Output WAJIB JSON murni berupa List of Objects:
+    Format Output WAJIB JSON murni List of Objects:
     [
       {{
         "style_name": "Gaya Konten (misal: Storytelling)",
@@ -225,8 +205,7 @@ def generate_bulk_threads(product_name: str, product_notes: str, affiliate_link:
     """
     raw_text = call_gemini_api_direct(prompt)
     match = re.search(r"\[.*\]", raw_text, re.DOTALL)
-    json_str = match.group(0) if match else raw_text
-    return json.loads(json_str)
+    return json.loads(match.group(0) if match else raw_text)
 
 # ==========================================
 # 4. CLIENT MODULE: THREADS API
@@ -356,9 +335,17 @@ class SheetsManager:
         self.sheet = self._connect()
 
     def _connect(self):
-        if not os.path.exists(self.creds_path):
-            raise FileNotFoundError(f"File kredensial '{self.creds_path}' tidak ditemukan.")
-        creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
+        # 1. Cek Secrets Cloud
+        if "GCP_SERVICE_ACCOUNT" in st.secrets:
+            raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
+            creds_info = json.loads(raw_gcp) if isinstance(raw_gcp, str) else raw_gcp
+            creds = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
+        # 2. Cek File Lokal
+        elif os.path.exists(self.creds_path):
+            creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
+        else:
+            raise FileNotFoundError("Kredensial GCP tidak ditemukan di Secrets maupun file lokal.")
+
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(self.spreadsheet_id)
         try:
@@ -425,11 +412,11 @@ class SheetsManager:
 def run_scheduler_job():
     load_dotenv(ENV_PATH, override=True)
     accounts = load_accounts()
-    sheet_id = os.getenv("SPREADSHEET_ID")
-    sheet_name = os.getenv("SHEET_NAME", "Sheet1")
-    creds_json = os.getenv("GOOGLE_CREDS_JSON", "credentials.json")
+    sheet_id = get_config_val("SPREADSHEET_ID")
+    sheet_name = get_config_val("SHEET_NAME", "Sheet1")
+    creds_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
 
-    if not accounts or not sheet_id or not os.path.exists(creds_json):
+    if not accounts or not sheet_id:
         return
 
     try:
@@ -529,13 +516,12 @@ tab_studio, tab_queue, tab_accounts, tab_settings, tab_logs = st.tabs([
 # ----------------------------------------------------
 with tab_studio:
     if not active_accounts:
-        st.warning("⚠️ Belum ada akun Threads yang ditambahkan. Silakan tambahkan di tab **👥 Multi-Account**.")
+        st.warning("⚠️ Belum ada akun Threads yang terdeteksi. Silakan atur di Secrets Cloud atau tab **👥 Multi-Account**.")
     else:
         st.caption(f"📢 Target Distribusi: **{len(active_accounts)} Akun** (" + ", ".join([f"`{a['name']}`" for a in active_accounts]) + ")")
 
     subtab_bulk, subtab_single = st.tabs(["🚀 1 Produk -> Batch Multi-Konten (Auto-Jadwal)", "✍️ Single Post Studio"])
 
-    # ---------------- SUBTAB A: BULK GENERATOR ----------------
     with subtab_bulk:
         st.subheader("Otomasi 1 Produk Menjadi Banyak Konten Berbeda Gaya")
         
@@ -555,7 +541,7 @@ with tab_studio:
                 bulk_interval_hours = st.selectbox(
                     "Jeda Waktu Antar Post:",
                     options=[2, 3, 4, 6, 8, 12, 24],
-                    index=2, # default 4 Jam
+                    index=2,
                     format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari (24 Jam)"
                 )
             with col_b_opt3:
@@ -565,7 +551,7 @@ with tab_studio:
             if not bulk_prod_name.strip():
                 st.error("Nama produk wajib diisi!")
             else:
-                with st.spinner(f"AI sedang mendeteksi model dan meracik {bulk_count} variasi utas..."):
+                with st.spinner(f"AI sedang meracik {bulk_count} variasi utas berbeda gaya..."):
                     try:
                         batch_results = generate_bulk_threads(
                             product_name=bulk_prod_name,
@@ -594,23 +580,21 @@ with tab_studio:
                             })
                         
                         st.session_state["generated_bulk_list"] = scheduled_items
-                        st.success(f"✅ Berhasil membuat {len(scheduled_items)} konten dengan gaya berbeda! Tinjau tabel di bawah.")
+                        st.success(f"✅ Berhasil membuat {len(scheduled_items)} konten dengan gaya berbeda!")
                     except Exception as e:
                         st.error(f"Gagal generate bulk konten: {e}")
 
-        # Pratinjau & Tombol Push ke Sheets
         if "generated_bulk_list" in st.session_state and st.session_state["generated_bulk_list"]:
             st.divider()
             st.markdown(f"#### 📋 Pratinjau {len(st.session_state['generated_bulk_list'])} Konten yang Dihasilkan:")
-            
             df_preview = pd.DataFrame(st.session_state["generated_bulk_list"])
             st.dataframe(df_preview[["schedule_date", "schedule_time", "style_name", "main_text", "reply_text"]], use_container_width=True, hide_index=True)
             
             if st.button(f"📥 Masukkan Semua ({len(st.session_state['generated_bulk_list'])} Konten) ke Google Sheets", use_container_width=True, type="primary"):
                 try:
-                    s_id = os.getenv("SPREADSHEET_ID")
-                    s_name = os.getenv("SHEET_NAME", "Sheet1")
-                    c_json = os.getenv("GOOGLE_CREDS_JSON", "credentials.json")
+                    s_id = get_config_val("SPREADSHEET_ID")
+                    s_name = get_config_val("SHEET_NAME", "Sheet1")
+                    c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
                     sheets = SheetsManager(c_json, s_id, s_name)
                     
                     sheets.append_rows_batch(st.session_state["generated_bulk_list"])
@@ -621,7 +605,6 @@ with tab_studio:
                 except Exception as ex:
                     st.error(f"Gagal menyimpan ke Google Sheets: {ex}")
 
-    # ---------------- SUBTAB B: SINGLE POST STUDIO ----------------
     with subtab_single:
         st.subheader("Buat / Edit 1 Postingan Spesifik")
         
@@ -659,16 +642,9 @@ with tab_studio:
 
         col_input, col_preview = st.columns([1.2, 0.8])
         with col_input:
-            main_content = st.text_area(
-                "Teks Postingan Utama (Hook)", 
-                value=st.session_state.get("f_main_text", ""),
-                height=110
-            )
+            main_content = st.text_area("Teks Postingan Utama (Hook)", value=st.session_state.get("f_main_text", ""), height=110)
             c_count = len(main_content)
-            if c_count > 500:
-                st.error(f"Karakter: {c_count}/500 (Melebihi batas!)")
-            else:
-                st.caption(f"Karakter: {c_count}/500")
+            st.caption(f"Karakter: {c_count}/500")
 
             img_url = st.text_input("URL Gambar", placeholder="https://domain.com/gambar.jpg")
             shopee_url = st.text_input("Link Shopee Affiliate (Single)", value=st.session_state.get("f_shopee_link", ""), placeholder="https://shope.ee/xxxxx")
@@ -707,9 +683,9 @@ with tab_studio:
                     st.error("Teks melebihi 500 karakter!")
                 else:
                     try:
-                        s_id = os.getenv("SPREADSHEET_ID")
-                        s_name = os.getenv("SHEET_NAME", "Sheet1")
-                        c_json = os.getenv("GOOGLE_CREDS_JSON", "credentials.json")
+                        s_id = get_config_val("SPREADSHEET_ID")
+                        s_name = get_config_val("SHEET_NAME", "Sheet1")
+                        c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
                         sheets = SheetsManager(c_json, s_id, s_name)
                         
                         sheets.append_row({
@@ -756,11 +732,11 @@ with tab_studio:
 with tab_queue:
     st.subheader("Data Antrean & Riwayat Google Sheets")
     
-    s_id = os.getenv("SPREADSHEET_ID")
-    c_json = os.getenv("GOOGLE_CREDS_JSON", "credentials.json")
-    s_name = os.getenv("SHEET_NAME", "Sheet1")
+    s_id = get_config_val("SPREADSHEET_ID")
+    c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
+    s_name = get_config_val("SHEET_NAME", "Sheet1")
 
-    if not s_id or not os.path.exists(c_json):
+    if not s_id:
         st.warning("⚠️ Konfigurasi Google Sheets belum lengkap.")
     else:
         try:
@@ -825,7 +801,7 @@ with tab_accounts:
 
         with col_del:
             acc_names = [a["name"] for a in active_accounts]
-            del_target = st.selectbox("Pilih Akun untuk Dihapus:", options=acc_names)
+            del_target = st.selectbox("Pilih Akun untuk Dihapus (Lokal):", options=acc_names)
             if st.button("🗑️ Hapus Akun Terpilih", use_container_width=True):
                 updated_accounts = [a for a in active_accounts if a["name"] != del_target]
                 save_accounts(updated_accounts)
@@ -836,7 +812,7 @@ with tab_accounts:
         st.info("Belum ada akun Threads terdaftar.")
 
     st.divider()
-    st.write("#### ➕ Tambah Akun Threads Baru")
+    st.write("#### ➕ Tambah Akun Threads Baru (Lokal)")
     with st.form("add_account_form"):
         new_acc_name = st.text_input("Label Akun", placeholder="Misal: Akun Fashion / Akun 2")
         new_acc_uid = st.text_input("Threads User ID", placeholder="17841400000000000")
@@ -864,15 +840,15 @@ with tab_settings:
     st.subheader("Konfigurasi API, AI & Google Sheets")
     
     with st.form("config_form"):
-        curr_gemini = os.getenv("GEMINI_API_KEY", "")
-        curr_s_id = os.getenv("SPREADSHEET_ID", "")
-        curr_s_name = os.getenv("SHEET_NAME", "Sheet1")
+        curr_gemini = get_config_val("GEMINI_API_KEY")
+        curr_s_id = get_config_val("SPREADSHEET_ID")
+        curr_s_name = get_config_val("SHEET_NAME", "Sheet1")
 
         val_gemini = st.text_input("Google Gemini API Key", value=curr_gemini, type="password")
         val_s_id = st.text_input("Google Spreadsheet ID", value=curr_s_id)
         val_s_name = st.text_input("Nama Worksheet / Tab", value=curr_s_name)
 
-        if st.form_submit_button("💾 Simpan Konfigurasi ke .env", use_container_width=True):
+        if st.form_submit_button("💾 Simpan Konfigurasi ke .env (Lokal)", use_container_width=True):
             if not os.path.exists(ENV_PATH):
                 open(ENV_PATH, "w").close()
             set_key(ENV_PATH, "GEMINI_API_KEY", val_gemini)
@@ -886,26 +862,17 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi AI Gemini")
     if st.button("🔍 Uji Generator Gemini API", use_container_width=True):
-        with st.spinner("Mendeteksi model aktif di akun Google Anda & menguji respon..."):
+        with st.spinner("Mendeteksi model aktif di akun Google Anda..."):
             try:
-                curr_k = os.getenv("GEMINI_API_KEY", "").strip()
+                curr_k = get_config_val("GEMINI_API_KEY")
                 models_found = get_available_gemini_models(curr_k)
                 if models_found:
-                    st.info(f"📋 Model aktif terdeteksi di akun Anda: `{', '.join(models_found[:4])}`")
+                    st.info(f"📋 Model aktif terdeteksi: `{', '.join(models_found[:4])}`")
                 
                 test_resp = call_gemini_api_direct("Buatkan 1 kalimat sapaan pendek untuk affiliate marketer.")
                 st.success(f"✅ Gemini AI Aktif & Merespons: \"{test_resp}\"")
             except Exception as e_test:
                 st.error(f"❌ Uji Gagal: {e_test}")
-
-    st.divider()
-    st.write("#### 📂 Upload Service Account (`credentials.json`)")
-    uploaded_json = st.file_uploader("Upload file kredensial GCP (.json)", type=["json"])
-    if uploaded_json is not None:
-        save_dest = os.path.join(os.path.dirname(__file__), "credentials.json")
-        with open(save_dest, "wb") as f:
-            f.write(uploaded_json.getbuffer())
-        st.success("✅ File `credentials.json` berhasil diperbarui!")
 
 # ----------------------------------------------------
 # TAB 5: SYSTEM LOGS
