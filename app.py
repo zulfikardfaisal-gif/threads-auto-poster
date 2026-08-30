@@ -126,7 +126,7 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. UNIVERSAL AI ENGINE (GROQ + GEMINI)
+# 3. UNIVERSAL AI ENGINE (DYNAMIC AUTO-DISCOVERY)
 # ==========================================
 STYLE_PROMPTS = {
     "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan sudut pandang dan tone paling persuasif untuk memicu klik dan konversi affiliate.",
@@ -143,23 +143,41 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
+def get_groq_active_models(api_key: str) -> list:
+    """Mengambil daftar model yang benar-benar aktif di akun Groq pengguna secara dinamis"""
+    url = "https://api.groq.com/openai/v1/models"
+    headers = {"Authorization": f"Bearer {api_key.strip()}"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            # Filter hanya model LLM teks (abaikan whisper/guard)
+            valid_models = [
+                m["id"] for m in data 
+                if not any(x in m["id"].lower() for x in ["whisper", "guard", "vision", "audio", "embed"])
+            ]
+            if valid_models:
+                return valid_models
+    except Exception:
+        pass
+    return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
+
 def call_groq_api(prompt: str, api_key: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json"
     }
-    models = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "gemma2-9b-it",
-        "deepseek-r1-distill-llama-70b"
-    ]
+    
+    # Ambil model aktif langsung dari server Groq
+    models_to_try = get_groq_active_models(api_key)
     err_list = []
-    for m in models:
+    
+    for m in models_to_try:
         payload = {
             "model": m,
             "messages": [
+                {"role": "system", "content": "You are a professional Indonesian Threads affiliate copywriter. Output valid raw JSON without markdown wrapping if requested."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.7
@@ -173,7 +191,7 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         except Exception as e:
             err_list.append(f"[{m}]: {str(e)}")
             continue
-    raise Exception(" | ".join(err_list))
+    raise Exception(f"Gagal memanggil Groq AI: {' | '.join(err_list)}")
 
 def call_gemini_rest(prompt: str, api_key: str) -> str:
     models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
@@ -190,7 +208,7 @@ def call_gemini_rest(prompt: str, api_key: str) -> str:
         except Exception as e:
             err_list.append(f"[{m}]: {str(e)}")
             continue
-    raise Exception(" | ".join(err_list))
+    raise Exception(f"Gagal memanggil Gemini: {' | '.join(err_list)}")
 
 def call_ai_engine(prompt: str, key_override: str = None) -> str:
     key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GROQ_API_KEY", get_config_val("GEMINI_API_KEY")))
@@ -220,7 +238,7 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     - Batasan Panjang Teks: {len_inst}
     - Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).
 
-    Format Output WAJIB JSON murni List of Objects:
+    Format Output WAJIB JSON murni List of Objects (tanpa formatting backticks):
     [
       {{
         "angle": "Sudut Pandang / Variasi",
@@ -923,7 +941,7 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi Generator AI")
     if st.button("🔍 Uji Generator AI Sekarang", use_container_width=True):
-        with st.spinner("Mengecek respon AI Engine..."):
+        with st.spinner("Mengambil model aktif dan menguji respon..."):
             try:
                 target_key = val_ai_key.strip() if val_ai_key else None
                 test_resp = call_ai_engine("Halo, buatkan 1 kalimat motivasi affiliate pendek.", key_override=target_key)
