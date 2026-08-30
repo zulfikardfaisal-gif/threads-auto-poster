@@ -35,13 +35,11 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def get_config_val(key: str, default: str = "") -> str:
-    """Mengambil config dari Streamlit Secrets atau .env lokal"""
     if key in st.secrets:
         return str(st.secrets[key]).strip()
     return os.getenv(key, default).strip()
 
 def clean_private_key(raw_key: str) -> str:
-    """Membersihkan dan menyusun ulang struktur PEM Private Key"""
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
     lines = [line.strip() for line in raw_key.split("\n") if line.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
@@ -122,18 +120,18 @@ def delete_account_from_sheets(name: str):
 # 3. AI GENERATOR ENGINE
 # ==========================================
 STYLE_PROMPTS = {
-    "🤖 Otomatis (AI Pintar Memilih)": "Analisis produk ini dan tentukan gaya paling menjual.",
+    "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan gaya penulisan paling persuasif dan memicu konversi pembelian.",
     "📖 Storytelling / Curhat Personal": "Gunakan sudut pandang orang pertama (pengalaman pribadi/curhat santai).",
-    "🔥 Spill Racun Diskon & FOMO": "Gaya bersemangat, racun Shopee, fokus ke diskon, voucher dan urgensi.",
-    "🧐 Review Edukatif & Bedah Fitur": "Gaya objektif, bedah spesifikasi, kualitas, dan alasan worth it.",
-    "✨ Aesthetic & Lifestyle Vibe": "Gaya santai, estetik, hangat, fokus pada visual kenyamanan.",
-    "🤣 Humor & Bahasa Gaul Santai": "Gaya santai linimasa Threads Indonesia, sedikit bercanda/relatable."
+    "🔥 Spill Racun Diskon & FOMO": "Gaya bersemangat, racun Shopee, fokus ke voucher diskon dan stok terbatas.",
+    "🧐 Review Edukatif & Bedah Fitur": "Gaya objektif, bedah spesifikasi material, dan alasan produk ini worth it.",
+    "✨ Aesthetic & Lifestyle Vibe": "Gaya santai, estetik, hangat, fokus pada visual kenyamanan gaya hidup.",
+    "🤣 Humor & Bahasa Gaul Santai": "Gaya santai linimasa Threads Indonesia, sedikit bercanda dan mengundang interaksi."
 }
 
 LENGTH_CONSTRAINTS = {
-    "Pendek (Punchy / 100-180 Karakter)": "Maksimal 180 karakter per postingan/balasan, to the point dan padat.",
-    "Sedang (Standar / 200-350 Karakter)": "Antara 200 hingga 350 karakter per postingan/balasan, penjelasan mengalir.",
-    "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per postingan/balasan (Maks 500 batas Threads), deskriptif dan mendalam."
+    "Pendek (Punchy / 100-180 Karakter)": "Maksimal 180 karakter per post/reply, padat dan to the point.",
+    "Sedang (Standar / 200-350 Karakter)": "Antara 200 hingga 350 karakter per post/reply, mengalir jelas.",
+    "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
 def get_available_gemini_models(api_key: str) -> list:
@@ -168,7 +166,7 @@ def call_gemini_api_direct(prompt: str) -> str:
         headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2500}
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
         }
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -179,65 +177,71 @@ def call_gemini_api_direct(prompt: str) -> str:
             continue
     raise Exception("Gagal memanggil API Gemini.")
 
-def generate_single_product_thread(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int) -> dict:
+def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 5) -> list:
     style_inst = STYLE_PROMPTS.get(style_choice, "")
-    len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 400 karakter.")
+    len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
     
     prompt = f"""
     Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia & Shopee Affiliate.
-    Buatkan konten Threads untuk:
+    Buatkan {count} buah Utas (Thread) yang BERBEDA SUDUT PANDANG & HOOK untuk produk:
     - Nama Produk: {product_name}
-    - Catatan/Kelebihan: {product_notes if product_notes else "Produk viral terlaris"}
-    - Gaya: {style_inst}
-    - Aturan Panjang: {len_inst}
-    - Jumlah Balasan (Reply): {reply_count} balasan (di luar post utama).
+    - Catatan/Spesifikasi: {product_notes if product_notes else "Produk viral terlaris, kualitas terjamin"}
+    - Gaya Penulisan: {style_inst}
+    - Batasan Panjang Teks: {len_inst}
+    - Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).
 
-    STRUKTUR:
-    - "main_text": Hook pembuka menarik.
-    - "replies": Array/List berisi {reply_count} string balasan berantai yang menyambung.
-
-    Output WAJIB format JSON murni:
-    {{
-      "main_text": "...",
-      "replies": ["..."]
-    }}
+    Format Output WAJIB JSON murni List of Objects:
+    [
+      {{
+        "angle": "Sudut Pandang / Variasi (misal: Racun Diskon / Solusi Masalah)",
+        "main_text": "Teks post utama hook ({len_inst})",
+        "replies": ["Teks balasan 1 ({len_inst})", "Teks balasan 2 ({len_inst})"]
+      }}
+    ]
     """
     raw_text = call_gemini_api_direct(prompt)
-    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-    data = json.loads(match.group(0) if match else raw_text)
+    match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+    items = json.loads(match.group(0) if match else raw_text)
     
-    # Pengaturan penempatan Link Affiliate
-    if reply_count == 0:
-        if affiliate_link:
-            data["main_text"] = f"{data.get('main_text', '')}\n\n👉 Beli di Shopee: {affiliate_link}"
-        data["replies"] = []
-    else:
-        replies = data.get("replies", [])[:reply_count]
-        if affiliate_link:
-            cta = f"👉 Beli di Shopee: {affiliate_link}"
-            if len(replies) > 0:
-                replies[-1] = f"{replies[-1]}\n\n{cta}"
-            else:
-                replies.append(cta)
-        data["replies"] = replies
+    processed_items = []
+    for item in items:
+        main_txt = item.get("main_text", "")
+        reps = item.get("replies", [])[:reply_count]
         
-    return data
+        if reply_count == 0:
+            if affiliate_link:
+                main_txt = f"{main_txt}\n\n👉 Beli di Shopee: {affiliate_link}"
+            reps = []
+        else:
+            if affiliate_link:
+                cta = f"👉 Beli di Shopee: {affiliate_link}"
+                if len(reps) > 0:
+                    reps[-1] = f"{reps[-1]}\n\n{cta}"
+                else:
+                    reps.append(cta)
+        
+        processed_items.append({
+            "angle": item.get("angle", "Variasi Konten"),
+            "main_text": main_txt,
+            "replies": reps
+        })
+        
+    return processed_items
 
 def generate_curated_listicle_thread(curation_topic: str, items: list, length_choice: str) -> dict:
-    """Membuat utas kurasi Top N produk, masing-masing dengan link uniknya"""
     len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
-    items_text = "\n".join([f"- Item #{i+1}: {it['name']} | Spesifikasi: {it['desc']} | Link: {it['link']}" for i, it in enumerate(items)])
+    items_text = "\n".join([f"- Item #{i+1}: {it['name']} | Catatan: {it['desc']} | Link: {it['link']}" for i, it in enumerate(items)])
     
     prompt = f"""
     Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia.
     Buatkan 1 Utas Kurasi Rekomendasi/Top List bertema: "{curation_topic}".
     
-    Daftar Produk yang Wajib Dimasukkan:
+    Daftar Produk:
     {items_text}
     
     Instruksi:
-    - "main_text": Hook pembuka daftar rekomendasi yang bikin penasaran ({len_inst}).
-    - "replies": Array/List di mana setiap elemen HANYA membahas 1 Item secara berurutan ({len_inst}), lalu diakhiri link pembelian masing-masing.
+    - "main_text": Hook pembuka rekomendasi ({len_inst}).
+    - "replies": Array/List di mana setiap elemen HANYA membahas 1 Item secara runtut ({len_inst}), diakhiri link Shopee masing-masing.
 
     Output WAJIB format JSON murni:
     {{
@@ -343,7 +347,6 @@ class ThreadsAPI:
         return published_ids
 
 def broadcast_post(all_registered_accounts: list, target_account_str: str, main_text: str, image_url: str = None, replies: list = None) -> list:
-    """Memfilter akun target (spesifik niche atau ALL) lalu mengeksekusi postingan"""
     target_str = str(target_account_str).strip()
     if target_str == "ALL" or not target_str:
         selected_accounts = all_registered_accounts
@@ -406,7 +409,6 @@ class SheetsManager:
         spreadsheet = client.open_by_key(self.spreadsheet_id)
         try:
             ws = spreadsheet.worksheet(self.sheet_name)
-            # Pastikan header kolom target_accounts tersedia
             row1 = ws.row_values(1)
             if "target_accounts" not in row1:
                 ws.insert_cols([["target_accounts"]], col=3)
@@ -543,7 +545,7 @@ initialize_background_scheduler()
 st.set_page_config(page_title="Threads Shopee Auto-Poster Hub", layout="wide", page_icon="🚀")
 
 st.title("🚀 Threads Multi-Account & AI Studio")
-st.markdown("Otomasi Shopee Affiliate: Targeted Niche, Multi-Link Listicle, Panjang Fleksibel, dan Penjadwalan Terpusat.")
+st.markdown("Otomasi Shopee Affiliate: Batch Single Produk, Targeted Niche, Multi-Link Listicle, dan Penjadwalan Terdistribusi.")
 
 active_accounts = load_accounts()
 account_names_list = [a["name"] for a in active_accounts]
@@ -574,13 +576,13 @@ with tab_studio:
         st.warning("⚠️ Belum ada akun Threads terdaftar. Silakan tambahkan di tab **👥 Multi-Account**.")
     
     subtab_single_prod, subtab_curation = st.tabs([
-        "🛍️ Single Produk (Direct / Thread)", 
+        "🛍️ Single Produk (Multi-Konten & Auto-Jadwal)", 
         "🏆 Kurasi Multi-Produk (Top 3/5 Rekomendasi + Multi-Link)"
     ])
 
-    # ------------------ SUBTAB 1: SINGLE PRODUK ------------------
+    # ------------------ SUBTAB 1: SINGLE PRODUK (BATCH GENERATOR) ------------------
     with subtab_single_prod:
-        st.subheader("Buat Postingan 1 Produk (Tentukan Target Akun & Jumlah Reply)")
+        st.subheader("Otomasi 1 Produk Menjadi Banyak Konten Berbeda Sudut Pandang")
         
         c_tgt1, c_tgt2, c_tgt3 = st.columns([1.5, 1, 1])
         with c_tgt1:
@@ -593,86 +595,99 @@ with tab_studio:
         with c_tgt2:
             len_choice = st.selectbox("📏 Panjang Postingan:", list(LENGTH_CONSTRAINTS.keys()), index=1)
         with c_tgt3:
-            rep_choice = st.selectbox("🧵 Jumlah Reply Balasan:", options=[0, 1, 2, 3, 4, 5], index=3, help="Jika 0, link langsung disematkan di postingan utama.")
+            rep_choice = st.selectbox("🧵 Jumlah Reply per Post:", options=[0, 1, 2, 3, 4, 5], index=3, help="Jika 0, link langsung disematkan di postingan utama.")
 
         col_p1, col_p2 = st.columns([1.2, 1.8])
         with col_p1:
-            p_name = st.text_input("Nama Produk", placeholder="Celana Sweatpants Loose Casual")
+            p_name = st.text_input("Nama Produk", placeholder="Contoh: Celana Sweatpants Loose Pria")
             p_link = st.text_input("Link Shopee Affiliate", placeholder="https://shope.ee/xxxxx")
             p_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto.jpg")
             p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()))
         with col_p2:
-            p_notes = st.text_area("Catatan Tambahan / Keunggulan Produk:", placeholder="Bahan fleece lembut, diskon 50%, ready ukuran jumbo...", height=120)
+            p_notes = st.text_area("Catatan / Keunggulan Produk:", placeholder="Bahan fleece halus tidak gerah, diskon 50% hari ini, ready ukuran jumbo...", height=90)
             
-            c_d1, c_d2 = st.columns(2)
-            with c_d1:
-                p_date = st.date_input("Tanggal Publikasi:", value=datetime.now(TZ_JAKARTA).date(), key="s_date")
-            with c_d2:
-                p_time = st.time_input("Waktu Publikasi:", value=datetime.now(TZ_JAKARTA).time(), key="s_time")
+            c_opt1, c_opt2, c_opt3, c_opt4 = st.columns([1, 1.2, 1.2, 1.2])
+            with c_opt1:
+                p_qty = st.number_input("Jumlah Konten:", min_value=1, max_value=15, value=5, step=1)
+            with c_opt2:
+                p_interval = st.selectbox(
+                    "Jeda Waktu Antar Post:",
+                    options=[1, 2, 3, 4, 6, 8, 12, 24],
+                    index=3,
+                    format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari (24 Jam)"
+                )
+            with c_opt3:
+                p_start_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date())
+            with c_opt4:
+                p_start_time = st.time_input("Mulai Jam / Waktu:", value=datetime.now(TZ_JAKARTA).time())
 
-        if st.button("🪄 Generate Teks dengan AI", use_container_width=True):
+        if st.button(f"🪄 Generate {p_qty} Konten Variatif & Siapkan Jadwal", use_container_width=True, type="primary"):
             if not p_name.strip():
                 st.error("Nama produk wajib diisi!")
             else:
-                with st.spinner("AI sedang meracik konten..."):
+                with st.spinner(f"AI sedang meracik {p_qty} variasi postingan dengan gaya & hook berbeda..."):
                     try:
-                        gen_res = generate_single_product_thread(p_name, p_notes, p_link, p_style, len_choice, rep_choice)
-                        st.session_state["single_main_txt"] = gen_res.get("main_text", "")
-                        st.session_state["single_replies"] = gen_res.get("replies", [])
-                        st.success("✅ Konten berhasil diracik!")
+                        batch_res = generate_bulk_single_product_threads(p_name, p_notes, p_link, p_style, len_choice, rep_choice, p_qty)
+                        
+                        start_base_dt = TZ_JAKARTA.localize(datetime.combine(p_start_date, p_start_time))
+                        scheduled_batch = []
+                        
+                        for idx, item in enumerate(batch_res):
+                            post_dt = start_base_dt + timedelta(hours=(idx * p_interval))
+                            scheduled_batch.append({
+                                "schedule_date": post_dt.strftime("%Y-%m-%d"),
+                                "schedule_time": post_dt.strftime("%H:%M"),
+                                "target_accounts": selected_target_str,
+                                "angle": item.get("angle", f"Konten #{idx+1}"),
+                                "main_text": item.get("main_text", ""),
+                                "main_image_url": p_img,
+                                "reply_text": " ||| ".join(item.get("replies", [])),
+                                "affiliate_link": p_link,
+                                "status": "PENDING"
+                            })
+                        
+                        st.session_state["single_batch_list"] = scheduled_batch
+                        st.success(f"✅ Berhasil membuat {len(scheduled_batch)} variasi postingan!")
                     except Exception as e:
                         st.error(f"Gagal generate: {e}")
 
-        # Form Edit Konten
-        st.divider()
-        edit_main = st.text_area("Postingan Utama (Hook):", value=st.session_state.get("single_main_txt", ""), height=100)
-        
-        cur_replies = st.session_state.get("single_replies", [])
-        edit_replies_list = []
-        if cur_replies:
-            st.write(f"**Rantai Balasan ({len(cur_replies)} Reply):**")
-            for idx, r_val in enumerate(cur_replies):
-                edited_r = st.text_input(f"Reply #{idx+1}", value=r_val, key=f"r_inp_{idx}")
-                edit_replies_list.append(edited_r)
-        
-        c_btn1, c_btn2 = st.columns(2)
-        with c_btn1:
-            if st.button("📥 Jadwalkan ke Google Sheets", use_container_width=True, type="primary", disabled=(len(active_accounts) == 0)):
-                if not edit_main.strip():
-                    st.error("Postingan utama tidak boleh kosong!")
-                else:
+        # Tinjau dan Jadwalkan Batch
+        if "single_batch_list" in st.session_state and st.session_state["single_batch_list"]:
+            st.divider()
+            st.markdown(f"#### 📋 Pratinjau & Edit Jadwal ({len(st.session_state['single_batch_list'])} Konten Siap Terbit)")
+            
+            for i, p_item in enumerate(st.session_state["single_batch_list"]):
+                with st.expander(f"📌 Post #{i+1} | Jadwal: {p_item['schedule_date']} {p_item['schedule_time']} WIB | ({p_item['angle']})", expanded=(i == 0)):
+                    p_item["main_text"] = st.text_area(f"Post Utama #{i+1}", value=p_item["main_text"], key=f"b_main_{i}", height=80)
+                    if p_item["reply_text"]:
+                        p_item["reply_text"] = st.text_input(f"Balasan Rantai (Pisahkan dengan |||)", value=p_item["reply_text"], key=f"b_rep_{i}")
+
+            col_sb1, col_sb2 = st.columns(2)
+            with col_sb1:
+                if st.button(f"📥 Masukkan Semua ({len(st.session_state['single_batch_list'])} Post) ke Google Sheets", use_container_width=True, type="primary"):
                     try:
                         s_id = get_config_val("SPREADSHEET_ID")
                         s_name = get_config_val("SHEET_NAME", "Sheet1")
                         c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
                         sheets = SheetsManager(c_json, s_id, s_name)
                         
-                        sheets.append_row({
-                            "schedule_date": p_date.strftime("%Y-%m-%d"),
-                            "schedule_time": p_time.strftime("%H:%M"),
-                            "target_accounts": selected_target_str,
-                            "main_text": edit_main,
-                            "main_image_url": p_img,
-                            "reply_text": " ||| ".join(edit_replies_list),
-                            "affiliate_link": p_link,
-                            "status": "PENDING"
-                        })
-                        st.success("🎉 Berhasil dijadwalkan ke Google Sheets!")
-                        time.sleep(1)
+                        sheets.append_rows_batch(st.session_state["single_batch_list"])
+                        st.success("🎉 Seluruh jadwal konten berhasil disimpan ke Google Sheets!")
+                        del st.session_state["single_batch_list"]
+                        time.sleep(1.2)
                         st.rerun()
                     except Exception as ex:
-                        st.error(f"Gagal simpan ke Sheets: {ex}")
+                        st.error(f"Gagal simpan ke Google Sheets: {ex}")
 
-        with c_btn2:
-            if st.button("⚡ Post Sekarang (Direct)", use_container_width=True, disabled=(len(active_accounts) == 0)):
-                if not edit_main.strip():
-                    st.error("Postingan utama tidak boleh kosong!")
-                else:
+            with col_sb2:
+                if st.button("⚡ Post Konten Pertama Sekarang (Direct)", use_container_width=True, disabled=(len(active_accounts) == 0)):
+                    first_item = st.session_state["single_batch_list"][0]
                     with st.spinner("Memposting..."):
-                        b_res = broadcast_post(active_accounts, selected_target_str, edit_main, p_img if p_img else None, edit_replies_list)
+                        rep_arr = [r.strip() for r in first_item["reply_text"].split("|||") if r.strip()]
+                        b_res = broadcast_post(active_accounts, selected_target_str, first_item["main_text"], first_item["main_image_url"], rep_arr)
                         for r in b_res:
                             if r["success"]:
-                                st.success(f"✅ Akun **{r['name']}**: Berhasil ({len(r['post_ids'])} post terbit)")
+                                st.success(f"✅ Akun **{r['name']}**: Berhasil diposting!")
                             else:
                                 st.error(f"❌ Akun **{r['name']}**: Gagal ({r['error']})")
 
@@ -693,7 +708,7 @@ with tab_studio:
         with c_k3:
             num_items = st.selectbox("📦 Jumlah Produk Rekomendasi:", options=[2, 3, 4, 5], index=1)
 
-        cur_topic = st.text_input("Topik / Judul Kurasi:", placeholder="Contoh: Top 3 Parfum Lokal Pria Wangi Mewah Tahan 12 Jam")
+        cur_topic = st.text_input("Topik / Judul Kurasi:", placeholder="Contoh: Top 3 Parfum Pria Wangi Mewah Tahan Seharian")
         cur_img = st.text_input("URL Gambar Utama Utas (Opsional):", placeholder="https://domain.com/foto_parfum.jpg")
 
         st.markdown("#### 🛍️ Rincian Produk:")
@@ -706,14 +721,14 @@ with tab_studio:
                 with col_i2:
                     it_l = st.text_input(f"Link Shopee Produk #{i+1}", key=f"it_link_{i}", placeholder="https://shope.ee/xxx1")
                 with col_i3:
-                    it_d = st.text_input(f"Kelebihan / Notes Singkat #{i+1}", key=f"it_desc_{i}", placeholder="Wangi hangat elegan, cocok acara malam")
+                    it_d = st.text_input(f"Kelebihan Singkat #{i+1}", key=f"it_desc_{i}", placeholder="Aroma warm spicy berkelas")
                 items_data.append({"name": it_n, "link": it_l, "desc": it_d})
 
         c_dt1, c_dt2 = st.columns(2)
         with c_dt1:
-            cur_date = st.date_input("Tanggal Publikasi Kurasi:", value=datetime.now(TZ_JAKARTA).date(), key="cur_date")
+            cur_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date(), key="cur_date")
         with c_dt2:
-            cur_time = st.time_input("Waktu Publikasi Kurasi:", value=datetime.now(TZ_JAKARTA).time(), key="cur_time")
+            cur_time = st.time_input("Mulai Jam:", value=datetime.now(TZ_JAKARTA).time(), key="cur_time")
 
         if st.button("🪄 Generate Utas Kurasi dengan AI", use_container_width=True, type="primary"):
             if not cur_topic.strip() or any(not it["name"].strip() for it in items_data):
@@ -730,7 +745,7 @@ with tab_studio:
 
         if "cur_main_txt" in st.session_state:
             st.divider()
-            edit_cur_main = st.text_area("Postingan Utama Kurasi (Hook):", value=st.session_state.get("cur_main_txt", ""), height=90)
+            edit_cur_main = st.text_area("Post Utama Kurasi (Hook):", value=st.session_state.get("cur_main_txt", ""), height=90)
             
             edit_cur_replies = []
             for idx, r_val in enumerate(st.session_state.get("cur_replies", [])):
