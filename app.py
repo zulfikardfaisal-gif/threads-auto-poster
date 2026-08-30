@@ -94,6 +94,18 @@ def get_gcp_credentials_dict():
 
     return None
 
+def clean_reply_item(item) -> str:
+    """Mengekstrak teks murni jika reply berbentuk dictionary atau nested object"""
+    if isinstance(item, dict):
+        for k in ["text", "reply", "content", "ulasan", "desc", "message"]:
+            if k in item and isinstance(item[k], str) and item[k].strip():
+                return item[k].strip()
+        for v in item.values():
+            if isinstance(v, str) and len(v.strip()) > 5:
+                return v.strip()
+        return str(item)
+    return str(item).strip()
+
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
     """Pembersih JSON kebal crash terhadap segala variasi output LLM"""
     if not raw_str or not str(raw_str).strip():
@@ -263,7 +275,7 @@ def call_groq_api(prompt: str, api_key: str) -> str:
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.7
+            "temperature": 0.75
         }
         try:
             res = requests.post(url, headers=headers, json=payload, timeout=25)
@@ -282,7 +294,7 @@ def call_groq_api(prompt: str, api_key: str) -> str:
             payload_raw = {
                 "model": m,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7
+                "temperature": 0.75
             }
             res = requests.post(url, headers=headers, json=payload_raw, timeout=25)
             if res.status_code == 200:
@@ -334,28 +346,24 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
     
     prompt = (
-    "Kamu adalah netizen Threads Indonesia tulen yang suka sharing barang racun Shopee secara santai, jujur, dan anti-kaku.\n"
-    "ATURAN GAYA BAHASA:\n"
-    "- Gunakan gaya bahasa santai/obrolan tongkrongan (pakai kata: gue/aku, bgt, beneran, jujurly, parah, ga abis fikri, racun, worth it).\n"
-    "- DILARANG memakai bahasa iklan TV yang kaku seperti: 'Sangat direkomendasikan', 'Produk inovatif ini hadir', 'Affiliate', 'Temukan kemudahan'.\n"
-    "- Mulai dengan HOOK rasa curhat, spill masalah harian, atau kaget sama kualitas barangnya.\n\n"
-    f"Buatkan {count} variasi utas berbeda sudut pandang untuk produk:\n"
-    f"- Produk: {product_name}\n"
-    f"- Info/Catatan: {product_notes if product_notes else 'Barang viral, kualitas bagus'}\n"
-    f"- Gaya Spesifik: {style_inst}\n"
-    f"- Batas Karakter: {len_inst}\n"
-    f"- Jumlah Balasan per Post: {reply_count}\n\n"
-    "Output WAJIB format JSON murni berakar 'items':\n"
-    "{\n"
-    '  "items": [\n'
-    "    {\n"
-    '      "angle": "Nama Sudut Pandang",\n'
-    f'      "main_text": "Teks hook utama ({len_inst})",\n'
-    f'      "replies": ["Teks balasan 1 ({len_inst})"]\n'
-    "    }\n"
-    "  ]\n"
-    "}"
-)
+        "Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia & Shopee Affiliate.\n"
+        f"Buatkan {count} buah Utas (Thread) yang BERBEDA SUDUT PANDANG & HOOK untuk produk:\n"
+        f"- Nama Produk: {product_name}\n"
+        f"- Catatan/Spesifikasi: {product_notes if product_notes else 'Produk viral terlaris, kualitas terjamin'}\n"
+        f"- Gaya Penulisan: {style_inst}\n"
+        f"- Batasan Panjang Teks: {len_inst}\n"
+        f"- Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).\n\n"
+        "Format JSON WAJIB string murni di dalam array replies:\n"
+        "{\n"
+        '  "items": [\n'
+        "    {\n"
+        '      "angle": "Sudut Pandang / Variasi",\n'
+        f'      "main_text": "Teks post utama hook ({len_inst})",\n'
+        f'      "replies": ["Teks balasan 1 ({len_inst})"]\n'
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
     raw_text = call_ai_engine(prompt)
     items = extract_and_parse_json(raw_text, default_count=count)
     
@@ -364,7 +372,7 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
         if isinstance(item, dict):
             main_txt = str(item.get("main_text", item.get("text", item.get("post", ""))))
             raw_reps = item.get("replies", item.get("balasan", []))
-            reps = [str(r) for r in raw_reps] if isinstance(raw_reps, list) else ([str(raw_reps)] if str(raw_reps).strip() else [])
+            reps = [clean_reply_item(r) for r in raw_reps] if isinstance(raw_reps, list) else ([clean_reply_item(raw_reps)] if str(raw_reps).strip() else [])
             angle_name = str(item.get("angle", item.get("judul", f"Variasi #{idx+1}")))
         elif isinstance(item, str):
             main_txt = item
@@ -407,13 +415,13 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
         f"Daftar Produk:\n{items_text}\n\n"
         "Instruksi:\n"
         f"- main_text: Hook pembuka rekomendasi ({len_inst}).\n"
-        f"- replies: Array di mana setiap elemen HANYA membahas 1 Item secara runtut ({len_inst}), diakhiri link Shopee masing-masing.\n\n"
-        "Format JSON wajib:\n"
+        f"- replies: Array string murni (BUKAN objek/dictionary). Setiap elemen membahas 1 Item ({len_inst}), diakhiri link Shopee masing-masing.\n\n"
+        "Format JSON WAJIB:\n"
         "{\n"
         '  "main_text": "...",\n'
         '  "replies": [\n'
-        '    "Ulasan Item 1...\\n\\nLink Shopee: ...",\n'
-        '    "Ulasan Item 2...\\n\\nLink Shopee: ..."\n'
+        '    "Item 1 - Ulasan...\\n\\nLink Shopee: ...",\n'
+        '    "Item 2 - Ulasan...\\n\\nLink Shopee: ..."\n'
         "  ]\n"
         "}"
     )
@@ -423,9 +431,11 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
     
     if isinstance(target_res, dict):
         main_text = str(target_res.get("main_text", target_res.get("text", "")))
-        reps = target_res.get("replies", [])
-        if isinstance(reps, str):
-            reps = [reps]
+        raw_reps = target_res.get("replies", [])
+        if isinstance(raw_reps, list):
+            reps = [clean_reply_item(r) for r in raw_reps]
+        else:
+            reps = [clean_reply_item(raw_reps)] if str(raw_reps).strip() else []
     else:
         main_text = str(target_res)
         reps = []
