@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import re
+import base64
 import logging
 from datetime import datetime, timedelta
 import pytz
@@ -34,6 +35,7 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def clean_ascii_str(text: str) -> str:
+    """Membersihkan seluruh whitespace tersembunyi / non-ascii"""
     if not text:
         return ""
     return re.sub(r"[^\x20-\x7E]", "", str(text)).strip()
@@ -46,54 +48,54 @@ def get_config_val(key: str, default: str = "") -> str:
         pass
     return clean_ascii_str(os.getenv(key, default))
 
-def clean_private_key(raw_key: str) -> str:
-    try:
-        raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
-        lines = [l.strip() for l in raw_key.split("\n") if l.strip()]
-        body = "".join([l for l in lines if not l.startswith("-----")])
-        body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
-        rem = len(body) % 4
-        if rem > 0:
-            body += "=" * (4 - rem)
-        chunks = [body[i:i+64] for i in range(0, len(body), 64)]
-        return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
-    except Exception:
-        return str(raw_key)
-
 def get_gcp_credentials_dict():
-    """Parser Kredensial GCP Kebal Crash (Mendukung Format TOML Table & String JSON)"""
+    """Parser Kredensial GCP (Base64, Direct File, String JSON, atau TOML Table)"""
+    # 1. Prioritas Utama: Base64 1 Baris
     try:
-        # 1. Cek format GCP_SERVICE_ACCOUNT (String JSON)
+        if "GCP_CREDS_BASE64" in st.secrets:
+            b64_str = str(st.secrets["GCP_CREDS_BASE64"]).strip()
+            decoded_json = base64.b64decode(b64_str).decode("utf-8")
+            return json.loads(decoded_json)
+    except Exception as e:
+        logger.warning(f"Parser Base64: {e}")
+
+    # 2. File credentials.json lokal
+    if os.path.exists("credentials.json"):
+        try:
+            with open("credentials.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Parser credentials.json: {e}")
+
+    # 3. String JSON GCP_SERVICE_ACCOUNT
+    try:
         if "GCP_SERVICE_ACCOUNT" in st.secrets:
             raw = st.secrets["GCP_SERVICE_ACCOUNT"]
             if isinstance(raw, str):
                 raw_str = raw.strip()
                 if raw_str.startswith("{") and raw_str.endswith("}"):
                     cd = json.loads(raw_str)
-                else:
-                    cd = None
-            else:
+                    if "private_key" in cd:
+                        cd["private_key"] = cd["private_key"].replace("\\n", "\n")
+                    return cd
+            elif isinstance(raw, dict):
                 cd = dict(raw)
-            if cd and isinstance(cd, dict) and "private_key" in cd:
-                cd["private_key"] = clean_private_key(cd["private_key"])
+                if "private_key" in cd:
+                    cd["private_key"] = cd["private_key"].replace("\\n", "\n")
                 return cd
+    except Exception as e:
+        logger.warning(f"Parser GCP_SERVICE_ACCOUNT: {e}")
 
-        # 2. Cek format [gcp_service_account] (TOML Table)
+    # 4. Format Table [gcp_service_account]
+    try:
         if "gcp_service_account" in st.secrets:
             cd = dict(st.secrets["gcp_service_account"])
             if "private_key" in cd:
-                cd["private_key"] = clean_private_key(cd["private_key"])
-                return cd
-
-        # 3. Cek file credentials.json lokal
-        if os.path.exists("credentials.json"):
-            with open("credentials.json", "r") as f:
-                cd = json.load(f)
-                if "private_key" in cd:
-                    cd["private_key"] = clean_private_key(cd["private_key"])
-                return cd
+                cd["private_key"] = cd["private_key"].replace("\\n", "\n")
+            return cd
     except Exception as e:
-        logger.warning(f"Kredensial GCP belum terbaca sempurna: {e}")
+        logger.warning(f"Parser gcp_service_account: {e}")
+
     return None
 
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
@@ -159,7 +161,7 @@ def get_accounts_worksheet():
             ws.append_row(["name", "user_id", "access_token"])
             return ws
     except Exception as e:
-        logger.warning(f"Akses tab Accounts tertunda: {e}")
+        logger.warning(f"Akses tab Accounts: {e}")
         return None
 
 def load_accounts() -> list:
@@ -184,7 +186,7 @@ def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
     if ws:
         ws.append_row([clean_ascii_str(name), clean_ascii_str(user_id), clean_ascii_str(access_token)])
     else:
-        raise Exception("Gagal terhubung ke Google Sheets. Pastikan format GCP Secret sudah valid dan diberi izin Editor.")
+        raise Exception("Gagal terhubung ke Google Sheets. Pastikan Service Account sudah dijadikan Editor.")
 
 def delete_account_from_sheets(name: str):
     ws = get_accounts_worksheet()
