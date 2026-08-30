@@ -50,7 +50,6 @@ def get_config_val(key: str, default: str = "") -> str:
 
 def get_gcp_credentials_dict():
     """Parser Kredensial GCP (Base64, Direct File, String JSON, atau TOML Table)"""
-    # 1. Prioritas Utama: Base64 1 Baris
     try:
         if "GCP_CREDS_BASE64" in st.secrets:
             b64_str = str(st.secrets["GCP_CREDS_BASE64"]).strip()
@@ -59,7 +58,6 @@ def get_gcp_credentials_dict():
     except Exception as e:
         logger.warning(f"Parser Base64: {e}")
 
-    # 2. File credentials.json lokal
     if os.path.exists("credentials.json"):
         try:
             with open("credentials.json", "r", encoding="utf-8") as f:
@@ -67,7 +65,6 @@ def get_gcp_credentials_dict():
         except Exception as e:
             logger.warning(f"Parser credentials.json: {e}")
 
-    # 3. String JSON GCP_SERVICE_ACCOUNT
     try:
         if "GCP_SERVICE_ACCOUNT" in st.secrets:
             raw = st.secrets["GCP_SERVICE_ACCOUNT"]
@@ -86,7 +83,6 @@ def get_gcp_credentials_dict():
     except Exception as e:
         logger.warning(f"Parser GCP_SERVICE_ACCOUNT: {e}")
 
-    # 4. Format Table [gcp_service_account]
     try:
         if "gcp_service_account" in st.secrets:
             cd = dict(st.secrets["gcp_service_account"])
@@ -99,6 +95,7 @@ def get_gcp_credentials_dict():
     return None
 
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
+    """Pembersih JSON kebal crash terhadap segala variasi output LLM"""
     if not raw_str or not str(raw_str).strip():
         return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi produk terbaik untukmu!", "replies": []} for i in range(default_count)]
     
@@ -122,17 +119,16 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
     try:
         data = json.loads(candidate, strict=False)
         if isinstance(data, dict):
-            if "items" in data and isinstance(data["items"], list):
-                return data["items"]
-            elif "threads" in data and isinstance(data["threads"], list):
-                return data["threads"]
+            for k in ["items", "threads", "posts", "data"]:
+                if k in data and isinstance(data[k], list):
+                    return data[k]
             return [data]
         elif isinstance(data, list):
             return data
     except Exception:
         pass
 
-    blocks = [b.strip() for b in text.split("\n\n") if len(b.strip()) > 20]
+    blocks = [b.strip() for b in text.split("\n\n") if len(b.strip()) > 15]
     fallback_res = []
     for idx, b in enumerate(blocks[:default_count]):
         fallback_res.append({
@@ -263,7 +259,7 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         payload = {
             "model": m,
             "messages": [
-                {"role": "system", "content": "You are a top Indonesian social media affiliate copywriter. Output valid JSON strictly adhering to instructions."},
+                {"role": "system", "content": "You are a top Indonesian social media affiliate copywriter. Always output valid JSON object strictly matching schema."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
@@ -360,9 +356,22 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     items = extract_and_parse_json(raw_text, default_count=count)
     
     processed_items = []
-    for item in items:
-        main_txt = item.get("main_text", "")
-        reps = item.get("replies", [])[:reply_count]
+    for idx, item in enumerate(items):
+        if isinstance(item, dict):
+            main_txt = str(item.get("main_text", item.get("text", item.get("post", ""))))
+            raw_reps = item.get("replies", item.get("balasan", []))
+            reps = [str(r) for r in raw_reps] if isinstance(raw_reps, list) else ([str(raw_reps)] if str(raw_reps).strip() else [])
+            angle_name = str(item.get("angle", item.get("judul", f"Variasi #{idx+1}")))
+        elif isinstance(item, str):
+            main_txt = item
+            reps = []
+            angle_name = f"Variasi #{idx+1}"
+        else:
+            main_txt = str(item)
+            reps = []
+            angle_name = f"Variasi #{idx+1}"
+
+        reps = reps[:reply_count]
         
         if reply_count == 0:
             if affiliate_link:
@@ -377,7 +386,7 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
                     reps.append(cta)
         
         processed_items.append({
-            "angle": item.get("angle", "Variasi Konten"),
+            "angle": angle_name,
             "main_text": main_txt,
             "replies": reps
         })
@@ -406,7 +415,18 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
     )
     raw_text = call_ai_engine(prompt)
     res = extract_and_parse_json(raw_text, default_count=1)
-    return res[0] if isinstance(res, list) and len(res) > 0 else res
+    target_res = res[0] if isinstance(res, list) and len(res) > 0 else res
+    
+    if isinstance(target_res, dict):
+        main_text = str(target_res.get("main_text", target_res.get("text", "")))
+        reps = target_res.get("replies", [])
+        if isinstance(reps, str):
+            reps = [reps]
+    else:
+        main_text = str(target_res)
+        reps = []
+        
+    return {"main_text": main_text, "replies": reps}
 
 # ==========================================
 # 4. CLIENT MODULE: THREADS API
@@ -525,7 +545,7 @@ def broadcast_post(all_registered_accounts: list, target_account_str: str, main_
     return results
 
 # ==========================================
-# 5. CLIENT MODULE: GOOGLE SHEETS (STRICT INDEX MAPPING)
+# 5. CLIENT MODULE: GOOGLE SHEETS (1:1 STRICT COLUMN MAPPING)
 # ==========================================
 class SheetsManager:
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
