@@ -825,7 +825,7 @@ with tab_queue:
 # TAB 3: MULTI-ACCOUNT MANAGEMENT
 # ----------------------------------------------------
 with tab_accounts:
-    st.subheader("Daftar Akun Threads Terhubung")
+    st.subheader("Daftar Akun Threads Terhubung (Google Sheets)")
     
     if active_accounts:
         df_acc = pd.DataFrame(active_accounts)
@@ -847,18 +847,17 @@ with tab_accounts:
 
         with col_del:
             acc_names = [a["name"] for a in active_accounts]
-            del_target = st.selectbox("Pilih Akun untuk Dihapus (Lokal):", options=acc_names)
+            del_target = st.selectbox("Pilih Akun untuk Dihapus:", options=acc_names)
             if st.button("🗑️ Hapus Akun Terpilih", use_container_width=True):
-                updated_accounts = [a for a in active_accounts if a["name"] != del_target]
-                save_accounts(updated_accounts)
-                st.success(f"Akun '{del_target}' dihapus.")
+                delete_account_from_sheets(del_target)
+                st.success(f"Akun '{del_target}' berhasil dihapus dari Google Sheets.")
                 time.sleep(1)
                 st.rerun()
     else:
-        st.info("Belum ada akun Threads terdaftar.")
+        st.info("Belum ada akun Threads terdaftar di Google Sheets.")
 
     st.divider()
-    st.write("#### ➕ Tambah Akun Threads Baru (Lokal)")
+    st.write("#### ➕ Tambah Akun Threads Baru")
     with st.form("add_account_form"):
         new_acc_name = st.text_input("Label Akun", placeholder="Misal: Akun Fashion / Akun 2")
         new_acc_uid = st.text_input("Threads User ID", placeholder="17841400000000000")
@@ -868,17 +867,13 @@ with tab_accounts:
             if not all([new_acc_name.strip(), new_acc_uid.strip(), new_acc_token.strip()]):
                 st.error("Semua kolom wajib diisi!")
             else:
-                existing_acc = load_accounts()
-                existing_acc.append({
-                    "name": new_acc_name.strip(),
-                    "user_id": new_acc_uid.strip(),
-                    "access_token": new_acc_token.strip()
-                })
-                save_accounts(existing_acc)
-                st.success(f"✅ Akun '{new_acc_name}' berhasil ditambahkan!")
-                time.sleep(1)
-                st.rerun()
-
+                try:
+                    save_new_account_to_sheets(new_acc_name, new_acc_uid, new_acc_token)
+                    st.success(f"✅ Akun '{new_acc_name}' berhasil disimpan permanen ke Google Sheets!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Gagal menyimpan akun: {ex}")
 # ----------------------------------------------------
 # TAB 4: SETTINGS & API KEYS
 # ----------------------------------------------------
