@@ -35,11 +35,13 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def get_config_val(key: str, default: str = "") -> str:
+    """Mengambil value konfigurasi dari Streamlit Secrets atau .env lokal"""
     if key in st.secrets:
         return str(st.secrets[key]).strip()
     return os.getenv(key, default).strip()
 
 def clean_private_key(raw_key: str) -> str:
+    """Membersihkan dan menyusun ulang struktur PEM Private Key secara otomatis"""
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
     lines = [line.strip() for line in raw_key.split("\n") if line.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
@@ -50,6 +52,7 @@ def clean_private_key(raw_key: str) -> str:
 # 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
+    """Membuka atau membuat tab 'Accounts' di Google Sheets"""
     s_id = get_config_val("SPREADSHEET_ID")
     c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
     if not s_id:
@@ -84,6 +87,7 @@ def get_accounts_worksheet():
         return None
 
 def load_accounts() -> list:
+    """Membaca akun tersimpan dari Google Sheets (tab Accounts)"""
     ws = get_accounts_worksheet()
     if ws:
         try:
@@ -101,6 +105,7 @@ def load_accounts() -> list:
     return []
 
 def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
+    """Menyimpan akun baru secara permanen ke Google Sheets"""
     ws = get_accounts_worksheet()
     if ws:
         ws.append_row([str(name).strip(), str(user_id).strip(), str(access_token).strip()])
@@ -108,6 +113,7 @@ def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
         raise Exception("Gagal terhubung ke Google Sheets.")
 
 def delete_account_from_sheets(name: str):
+    """Menghapus akun dari tab Google Sheets"""
     ws = get_accounts_worksheet()
     if ws:
         records = ws.get_all_records()
@@ -117,20 +123,20 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. AI GENERATOR ENGINE
+# 3. AI GENERATOR ENGINE (GEMINI REST API)
 # ==========================================
 STYLE_PROMPTS = {
-    "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan gaya penulisan paling persuasif dan memicu konversi pembelian.",
+    "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan sudut pandang dan tone paling persuasif untuk memicu klik dan konversi affiliate.",
     "📖 Storytelling / Curhat Personal": "Gunakan sudut pandang orang pertama (pengalaman pribadi/curhat santai).",
-    "🔥 Spill Racun Diskon & FOMO": "Gaya bersemangat, racun Shopee, fokus ke voucher diskon dan stok terbatas.",
-    "🧐 Review Edukatif & Bedah Fitur": "Gaya objektif, bedah spesifikasi material, dan alasan produk ini worth it.",
+    "🔥 Spill Racun Diskon & FOMO": "Gaya bersemangat, racun Shopee, fokus ke voucher diskon, harga miring, dan stok terbatas.",
+    "🧐 Review Edukatif & Bedah Fitur": "Gaya objektif, bedah spesifikasi bahan/material, dan alasan kenapa produk ini sangat worth it.",
     "✨ Aesthetic & Lifestyle Vibe": "Gaya santai, estetik, hangat, fokus pada visual kenyamanan gaya hidup.",
-    "🤣 Humor & Bahasa Gaul Santai": "Gaya santai linimasa Threads Indonesia, sedikit bercanda dan mengundang interaksi."
+    "🤣 Humor & Bahasa Gaul Santai": "Gaya santai linimasa Threads Indonesia, sedikit bercanda dan mengundang interaksi netizen."
 }
 
 LENGTH_CONSTRAINTS = {
     "Pendek (Punchy / 100-180 Karakter)": "Maksimal 180 karakter per post/reply, padat dan to the point.",
-    "Sedang (Standar / 200-350 Karakter)": "Antara 200 hingga 350 karakter per post/reply, mengalir jelas.",
+    "Sedang (Standar / 200-350 Karakter)": "Antara 200 hingga 350 karakter per post/reply, penjelasan mengalir jelas.",
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
@@ -149,18 +155,38 @@ def get_available_gemini_models(api_key: str) -> list:
                         valid_models.append(m_id)
             return valid_models
     except Exception as e:
-        logger.warning(f"Gagal deteksi model: {e}")
+        logger.warning(f"Gagal deteksi model Gemini: {e}")
     return []
 
-def call_gemini_api_direct(prompt: str) -> str:
-    api_key = get_config_val("GEMINI_API_KEY")
+def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
+    api_key = api_key_override.strip() if api_key_override else get_config_val("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY belum disetel!")
 
     active_models = get_available_gemini_models(api_key)
-    priority_order = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash"]
-    ordered_models = [p for p in priority_order if p in active_models] or priority_order
+    priority_order = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-flash-latest",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-pro"
+    ]
+    
+    ordered_models = []
+    for p in priority_order:
+        if p in active_models and p not in ordered_models:
+            ordered_models.append(p)
+    for m in active_models:
+        if m not in ordered_models:
+            ordered_models.append(m)
 
+    if not ordered_models:
+        ordered_models = priority_order
+
+    last_error = ""
     for model_name in ordered_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
@@ -173,9 +199,13 @@ def call_gemini_api_direct(prompt: str) -> str:
             if res.status_code == 200:
                 data = res.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception:
+            else:
+                last_error = f"Model '{model_name}' (HTTP {res.status_code}): {res.text}"
+        except Exception as e:
+            last_error = f"Model '{model_name}': {str(e)}"
             continue
-    raise Exception("Gagal memanggil API Gemini.")
+
+    raise Exception(f"Gagal memanggil API Gemini. Detail: {last_error}")
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 5) -> list:
     style_inst = STYLE_PROMPTS.get(style_choice, "")
@@ -911,10 +941,11 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi AI Gemini")
     if st.button("🔍 Uji Generator Gemini API", use_container_width=True):
-        with st.spinner("Mengecek respon AI..."):
+        with st.spinner("Mengecek respon AI dengan Key yang diinput..."):
             try:
-                test_resp = call_gemini_api_direct("Halo, buatkan 1 kalimat motivasi affiliate.")
-                st.success(f"✅ Gemini AI Aktif: \"{test_resp}\"")
+                target_key = val_gemini.strip() if val_gemini else get_config_val("GEMINI_API_KEY")
+                test_resp = call_gemini_api_direct("Halo, buatkan 1 kalimat motivasi affiliate pendek.", api_key_override=target_key)
+                st.success(f"✅ Gemini AI Aktif & Merespons: \"{test_resp}\"")
             except Exception as e_test:
                 st.error(f"❌ Uji Gagal: {e_test}")
 
