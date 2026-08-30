@@ -40,8 +40,16 @@ def get_config_val(key: str, default: str = "") -> str:
         return str(st.secrets[key]).strip()
     return os.getenv(key, default).strip()
 
+def clean_private_key(raw_key: str) -> str:
+    """Membersihkan dan menyusun ulang struktur PEM Private Key secara otomatis"""
+    raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
+    lines = [line.strip() for line in raw_key.split("\n") if line.strip()]
+    body = "".join([l for l in lines if not l.startswith("-----")])
+    chunks = [body[i:i+64] for i in range(0, len(body), 64)]
+    return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
+
 # ==========================================
-# 2. HELPER DATA MULTI-AKUN (PERMANEN GOOGLE SHEETS)
+# 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
     """Membuka atau membuat tab 'Accounts' di Google Sheets"""
@@ -55,13 +63,13 @@ def get_accounts_worksheet():
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
             if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
         elif "GCP_SERVICE_ACCOUNT" in st.secrets:
             raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
             creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
             if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
         elif os.path.exists(c_json):
             creds = Credentials.from_service_account_file(c_json, scopes=SheetsManager.SCOPES)
@@ -90,8 +98,7 @@ def load_accounts() -> list:
             return [r for r in records if str(r.get("user_id", "")).strip() != ""]
         except Exception:
             pass
-    
-    # Fallback ke Secrets jika ada
+            
     if "ACCOUNTS_JSON" in st.secrets:
         try:
             val = st.secrets["ACCOUNTS_JSON"]
@@ -117,8 +124,9 @@ def delete_account_from_sheets(name: str):
             if str(r.get("name", "")).strip() == name:
                 ws.delete_rows(i)
                 break
+
 # ==========================================
-# 3. AI GENERATOR ENGINE (AUTO-DISCOVERY REST API)
+# 3. AI GENERATOR ENGINE (GEMINI REST API)
 # ==========================================
 STYLE_PROMPTS = {
     "🤖 Otomatis (AI Pintar Memilih)": "Analisis produk ini dan pilih gaya terbaik yang paling relevan.",
@@ -150,7 +158,7 @@ def get_available_gemini_models(api_key: str) -> list:
 def call_gemini_api_direct(prompt: str) -> str:
     api_key = get_config_val("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY belum disetel! Masukkan di Secrets atau tab Konfigurasi.")
+        raise ValueError("GEMINI_API_KEY belum disetel! Masukkan di Secrets.")
 
     active_models = get_available_gemini_models(api_key)
     priority_order = [
@@ -384,20 +392,17 @@ class SheetsManager:
         self.sheet = self._connect()
 
     def _connect(self):
-        # 1. Cek struktur [gcp_service_account] (TOML Table)
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
             if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=self.SCOPES)
-        # 2. Cek format string GCP_SERVICE_ACCOUNT
         elif "GCP_SERVICE_ACCOUNT" in st.secrets:
             raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
             creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
             if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n").strip()
+                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
             creds = Credentials.from_service_account_info(creds_dict, scopes=self.SCOPES)
-        # 3. Fallback file lokal laptop
         elif os.path.exists(self.creds_path):
             creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
         else:
@@ -467,7 +472,6 @@ class SheetsManager:
 # 6. BACKGROUND SCHEDULER ENGINE
 # ==========================================
 def run_scheduler_job():
-    load_dotenv(ENV_PATH, override=True)
     accounts = load_accounts()
     sheet_id = get_config_val("SPREADSHEET_ID")
     sheet_name = get_config_val("SHEET_NAME", "Sheet1")
@@ -573,7 +577,7 @@ tab_studio, tab_queue, tab_accounts, tab_settings, tab_logs = st.tabs([
 # ----------------------------------------------------
 with tab_studio:
     if not active_accounts:
-        st.warning("⚠️ Belum ada akun Threads yang terdeteksi. Silakan atur di Secrets Cloud atau tab **👥 Multi-Account**.")
+        st.warning("⚠️ Belum ada akun Threads terdeteksi. Silakan tambahkan di tab **👥 Multi-Account**.")
     else:
         st.caption(f"📢 Target Distribusi: **{len(active_accounts)} Akun** (" + ", ".join([f"`{a['name']}`" for a in active_accounts]) + ")")
 
@@ -794,7 +798,7 @@ with tab_queue:
     s_name = get_config_val("SHEET_NAME", "Sheet1")
 
     if not s_id:
-        st.warning("⚠️ Konfigurasi Google Sheets belum lengkap.")
+        st.warning("⚠️ Konfigurasi Google Sheets belum lengkap di Secrets.")
     else:
         try:
             sheets_client = SheetsManager(c_json, s_id, s_name)
@@ -833,7 +837,7 @@ with tab_queue:
             st.error(f"Gagal memuat data dari Google Sheets: {e}")
 
 # ----------------------------------------------------
-# TAB 3: MULTI-ACCOUNT MANAGEMENT
+# TAB 3: MULTI-ACCOUNT MANAGEMENT (PERMANEN SHEETS)
 # ----------------------------------------------------
 with tab_accounts:
     st.subheader("Daftar Akun Threads Terhubung (Google Sheets)")
@@ -885,6 +889,7 @@ with tab_accounts:
                     st.rerun()
                 except Exception as ex:
                     st.error(f"Gagal menyimpan akun: {ex}")
+
 # ----------------------------------------------------
 # TAB 4: SETTINGS & API KEYS
 # ----------------------------------------------------
