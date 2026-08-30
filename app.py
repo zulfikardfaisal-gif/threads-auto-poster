@@ -34,15 +34,15 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def clean_ascii_str(text: str) -> str:
-    """Membersihkan seluruh karakter tersembunyi / non-ascii"""
+    """Membersihkan seluruh whitespace tersembunyi / non-ascii"""
     if not text:
         return ""
     return re.sub(r"[^\x20-\x7E]", "", str(text)).strip()
 
 def get_config_val(key: str, default: str = "") -> str:
     if key in st.secrets:
-        return str(st.secrets[key]).strip()
-    return os.getenv(key, default).strip()
+        return clean_ascii_str(str(st.secrets[key]))
+    return clean_ascii_str(os.getenv(key, default))
 
 def clean_private_key(raw_key: str) -> str:
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
@@ -76,6 +76,7 @@ def get_gcp_credentials_dict():
     return None
 
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
+    """Pembersih output JSON dari AI dengan fallback aman"""
     if not raw_str or not str(raw_str).strip():
         return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi produk terbaik untukmu!", "replies": []} for i in range(default_count)]
     
@@ -87,10 +88,8 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
         text = text.replace(bt3 + "json", "").replace(bt3 + "JSON", "").replace(bt3, "")
     text = text.strip()
     
-    f_bracket = text.find('[')
-    l_bracket = text.rfind(']')
-    f_brace = text.find('{')
-    l_brace = text.rfind('}')
+    f_bracket, l_bracket = text.find('['), text.rfind(']')
+    f_brace, l_brace = text.find('{'), text.rfind('}')
     
     candidate = text
     if f_bracket != -1 and l_bracket != -1 and (f_brace == -1 or f_bracket < f_brace):
@@ -111,6 +110,7 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
     except Exception:
         pass
 
+    # Fallback teks ke objek data jika AI merespons di luar struktur JSON
     blocks = [b.strip() for b in text.split("\n\n") if len(b.strip()) > 20]
     fallback_res = []
     for idx, b in enumerate(blocks[:default_count]):
@@ -125,7 +125,7 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
 # 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
-    s_id = clean_ascii_str(get_config_val("SPREADSHEET_ID"))
+    s_id = get_config_val("SPREADSHEET_ID")
     creds_dict = get_gcp_credentials_dict()
     if not s_id or not creds_dict:
         return None
@@ -163,7 +163,7 @@ def load_accounts() -> list:
 def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
     ws = get_accounts_worksheet()
     if ws:
-        ws.append_row([str(name).strip(), str(user_id).strip(), str(access_token).strip()])
+        ws.append_row([clean_ascii_str(name), clean_ascii_str(user_id), clean_ascii_str(access_token)])
     else:
         raise Exception("Gagal terhubung ke Google Sheets. Pastikan Service Account sudah dijadikan Editor.")
 
@@ -177,7 +177,7 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. UNIVERSAL AI ENGINE
+# 3. UNIVERSAL AI ENGINE (LIVE MODEL DISCOVERY)
 # ==========================================
 STYLE_PROMPTS = {
     "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan sudut pandang dan tone paling persuasif untuk memicu klik dan konversi affiliate.",
@@ -194,21 +194,46 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
+def get_groq_active_models(clean_key: str) -> list:
+    """Mengambil daftar model yang benar-benar aktif di akun pengguna langsung dari API Groq"""
+    url = "https://api.groq.com/openai/v1/models"
+    headers = {"Authorization": f"Bearer {clean_key}"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            valid_models = [
+                m["id"] for m in data 
+                if m.get("active", True) and not any(x in m["id"].lower() for x in ["whisper", "guard", "vision", "audio", "embed", "tts", "moderation"])
+            ]
+            if valid_models:
+                return valid_models
+    except Exception as e:
+        logger.warning(f"Gagal mengambil model dinamis Groq: {e}")
+    return []
+
 def call_groq_api(prompt: str, api_key: str) -> str:
     clean_key = clean_ascii_str(api_key)
-    url = clean_ascii_str("https://api.groq.com/openai/v1/chat/completions")
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {clean_key}",
         "Content-Type": "application/json"
     }
-    models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
+    
+    # 1. Ambil model yang aktif di akun saat ini
+    models = get_groq_active_models(clean_key)
+    if not models:
+        # Fallback list jika discovery gagal
+        models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b", "gemma2-9b-it"]
+
     err_list = []
     
+    # 2. Coba jalankan dengan JSON Schema
     for m in models:
         payload = {
             "model": m,
             "messages": [
-                {"role": "system", "content": "You are a professional Indonesian Threads affiliate copywriter. Always output valid JSON object strictly matching schema."},
+                {"role": "system", "content": "You are a top Indonesian social media affiliate copywriter. Output valid JSON strictly adhering to instructions."},
                 {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"},
@@ -225,20 +250,24 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         except Exception as e:
             err_list.append(f"[{m}]: {str(e)}")
             continue
-            
+
+    # 3. Coba jalankan format standar jika response_format ditolak
     for m in models:
         try:
-            payload_simple = {
+            payload_raw = {
                 "model": m,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7
             }
-            res = requests.post(url, headers=headers, json=payload_simple, timeout=25)
+            res = requests.post(url, headers=headers, json=payload_raw, timeout=25)
             if res.status_code == 200:
-                return res.json()["choices"][0]["message"]["content"].strip()
+                data = res.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                if content:
+                    return content
         except Exception:
             continue
-            
+
     raise Exception(f"Gagal memanggil Groq AI: {' | '.join(err_list)}")
 
 def call_gemini_rest(prompt: str, api_key: str) -> str:
@@ -246,7 +275,7 @@ def call_gemini_rest(prompt: str, api_key: str) -> str:
     models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
     err_list = []
     for m in models:
-        url = clean_ascii_str(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={clean_key}")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={clean_key}"
         headers = {"Content-Type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.7}}
         try:
@@ -361,13 +390,13 @@ class ThreadsAPI:
         self.access_token = clean_ascii_str(access_token)
 
     def test_connection(self) -> dict:
-        url = clean_ascii_str(f"{self.BASE_URL}/me")
+        url = f"{self.BASE_URL}/me"
         params = {"fields": "id,username,name", "access_token": self.access_token}
         res = requests.get(url, params=params, timeout=15)
         return res.json()
 
     def _wait_for_container(self, container_id: str, max_retries: int = 10, delay: int = 3) -> bool:
-        url = clean_ascii_str(f"{self.BASE_URL}/{container_id}")
+        url = f"{self.BASE_URL}/{container_id}"
         params = {"fields": "status,error_message", "access_token": self.access_token}
         for _ in range(max_retries):
             try:
@@ -385,7 +414,7 @@ class ThreadsAPI:
         return True
 
     def create_container(self, text: str = "", image_url: str = None, reply_to_id: str = None) -> str:
-        url = clean_ascii_str(f"{self.BASE_URL}/{self.user_id}/threads")
+        url = f"{self.BASE_URL}/{self.user_id}/threads"
         payload = {"access_token": self.access_token}
 
         if text:
@@ -410,7 +439,7 @@ class ThreadsAPI:
 
     def publish_container(self, container_id: str) -> str:
         self._wait_for_container(container_id)
-        url = clean_ascii_str(f"{self.BASE_URL}/{self.user_id}/threads_publish")
+        url = f"{self.BASE_URL}/{self.user_id}/threads_publish"
         payload = {"creation_id": container_id, "access_token": self.access_token}
         res = requests.post(url, data=payload, timeout=20)
         res_data = res.json()
