@@ -334,24 +334,28 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
     
     prompt = (
-        "Bertindaklah sebagai Copywriter Top Tier spesialis Threads Indonesia & Shopee Affiliate.\n"
-        f"Buatkan {count} buah Utas (Thread) yang BERBEDA SUDUT PANDANG & HOOK untuk produk:\n"
-        f"- Nama Produk: {product_name}\n"
-        f"- Catatan/Spesifikasi: {product_notes if product_notes else 'Produk viral terlaris, kualitas terjamin'}\n"
-        f"- Gaya Penulisan: {style_inst}\n"
-        f"- Batasan Panjang Teks: {len_inst}\n"
-        f"- Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).\n\n"
-        "Format JSON wajib memiliki root 'items':\n"
-        "{\n"
-        '  "items": [\n'
-        "    {\n"
-        '      "angle": "Sudut Pandang / Variasi",\n'
-        f'      "main_text": "Teks post utama hook ({len_inst})",\n'
-        f'      "replies": ["Teks balasan 1 ({len_inst})"]\n'
-        "    }\n"
-        "  ]\n"
-        "}"
-    )
+    "Kamu adalah netizen Threads Indonesia tulen yang suka sharing barang racun Shopee secara santai, jujur, dan anti-kaku.\n"
+    "ATURAN GAYA BAHASA:\n"
+    "- Gunakan gaya bahasa santai/obrolan tongkrongan (pakai kata: gue/aku, bgt, beneran, jujurly, parah, ga abis fikri, racun, worth it).\n"
+    "- DILARANG memakai bahasa iklan TV yang kaku seperti: 'Sangat direkomendasikan', 'Produk inovatif ini hadir', 'Affiliate', 'Temukan kemudahan'.\n"
+    "- Mulai dengan HOOK rasa curhat, spill masalah harian, atau kaget sama kualitas barangnya.\n\n"
+    f"Buatkan {count} variasi utas berbeda sudut pandang untuk produk:\n"
+    f"- Produk: {product_name}\n"
+    f"- Info/Catatan: {product_notes if product_notes else 'Barang viral, kualitas bagus'}\n"
+    f"- Gaya Spesifik: {style_inst}\n"
+    f"- Batas Karakter: {len_inst}\n"
+    f"- Jumlah Balasan per Post: {reply_count}\n\n"
+    "Output WAJIB format JSON murni berakar 'items':\n"
+    "{\n"
+    '  "items": [\n'
+    "    {\n"
+    '      "angle": "Nama Sudut Pandang",\n'
+    f'      "main_text": "Teks hook utama ({len_inst})",\n'
+    f'      "replies": ["Teks balasan 1 ({len_inst})"]\n'
+    "    }\n"
+    "  ]\n"
+    "}"
+)
     raw_text = call_ai_engine(prompt)
     items = extract_and_parse_json(raw_text, default_count=count)
     
