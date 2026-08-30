@@ -11,6 +11,7 @@ import streamlit as st
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
+import google.auth.transport.requests
 from dotenv import load_dotenv, set_key
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -49,7 +50,38 @@ def clean_private_key(raw_key: str) -> str:
     return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
 
 # ==========================================
-# 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
+# 2. OAUTH2 TOKEN GENERATOR (SERVICE ACCOUNT)
+# ==========================================
+def get_service_account_oauth_token() -> str:
+    """Membuat OAuth 2.0 Access Token langsung dari GCP Service Account yang ada di Secrets"""
+    try:
+        creds_dict = None
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+        elif "GCP_SERVICE_ACCOUNT" in st.secrets:
+            raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
+            creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
+        elif os.path.exists("credentials.json"):
+            with open("credentials.json", "r") as f:
+                creds_dict = json.load(f)
+
+        if creds_dict:
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
+            scopes = [
+                "https://www.googleapis.com/auth/generative-language",
+                "https://www.googleapis.com/auth/cloud-platform"
+            ]
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            auth_req = google.auth.transport.requests.Request()
+            creds.refresh(auth_req)
+            return creds.token
+    except Exception as e:
+        logger.warning(f"Opsi Service Account OAuth2 fallback: {e}")
+    return None
+
+# ==========================================
+# 3. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
     """Membuka atau membuat tab 'Accounts' di Google Sheets"""
@@ -123,7 +155,7 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. AI GENERATOR ENGINE (GEMINI REST API)
+# 4. AI GENERATOR ENGINE (HYBRID REST + OAUTH)
 # ==========================================
 STYLE_PROMPTS = {
     "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan sudut pandang dan tone paling persuasif untuk memicu klik dan konversi affiliate.",
@@ -140,89 +172,74 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
-def get_available_gemini_models(api_key: str) -> list:
-    if not api_key:
-        return []
-    
-    if api_key.startswith("AQ."):
-        url = "https://generativelanguage.googleapis.com/v1beta/models"
-        headers = {"Authorization": f"Bearer {api_key}"}
-    else:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        headers = {"x-goog-api-key": api_key}
-
-    try:
-        res = requests.get(url, headers=headers, timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            valid_models = []
-            for m in data.get("models", []):
-                methods = m.get("supportedGenerationMethods", [])
-                if "generateContent" in methods:
-                    m_id = m.get("name", "").replace("models/", "")
-                    if not any(skip in m_id.lower() for skip in ["embedding", "imagen", "aqa", "text-embedding"]):
-                        valid_models.append(m_id)
-            return valid_models
-    except Exception as e:
-        logger.warning(f"Gagal deteksi model Gemini: {e}")
-    return []
-
 def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
-    api_key = api_key_override.strip() if api_key_override else get_config_val("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY belum disetel!")
+    """Memanggil Gemini dengan prioritas OAuth2 Service Account -> Bearer API Key -> Query Param API Key"""
+    oauth_token = get_service_account_oauth_token()
+    raw_api_key = api_key_override.strip() if api_key_override else get_config_val("GEMINI_API_KEY")
 
-    active_models = get_available_gemini_models(api_key)
-    priority_order = [
-        "gemini-2.5-flash",
+    models_to_try = [
         "gemini-2.0-flash",
-        "gemini-flash-latest",
-        "gemini-2.5-pro",
-        "gemini-1.5-flash-latest",
         "gemini-1.5-flash",
-        "gemini-pro"
+        "gemini-2.5-flash",
+        "gemini-1.5-pro",
+        "gemini-flash-latest"
     ]
-    
-    ordered_models = []
-    for p in priority_order:
-        if p in active_models and p not in ordered_models:
-            ordered_models.append(p)
-    for m in active_models:
-        if m not in ordered_models:
-            ordered_models.append(m)
-
-    if not ordered_models:
-        ordered_models = priority_order
 
     last_error = ""
-    for model_name in ordered_models:
-        if api_key.startswith("AQ."):
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-        else:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-            headers = {
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json"
-            }
 
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
-        }
-        try:
-            res = requests.post(url, headers=headers, json=payload, timeout=30)
-            if res.status_code == 200:
-                data = res.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    # Jalur 1: Menggunakan Service Account OAuth 2.0 (Bypass semua blokir API Key)
+    if oauth_token:
+        for m_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
+            headers = {
+                "Authorization": f"Bearer {oauth_token}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
+            }
+            try:
+                res = requests.post(url, headers=headers, json=payload, timeout=30)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                else:
+                    last_error = f"[OAuth ServiceAccount - {m_name}] HTTP {res.status_code}: {res.text}"
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+    # Jalur 2: Menggunakan API Key manual jika OAuth Service Account tidak tersedia
+    if raw_api_key:
+        for m_name in models_to_try:
+            if raw_api_key.startswith("AQ."):
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
+                headers = {
+                    "Authorization": f"Bearer {raw_api_key}",
+                    "Content-Type": "application/json"
+                }
             else:
-                last_error = f"Model '{model_name}' (HTTP {res.status_code}): {res.text}"
-        except Exception as e:
-            last_error = f"Model '{model_name}': {str(e)}"
-            continue
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={raw_api_key}"
+                headers = {
+                    "x-goog-api-key": raw_api_key,
+                    "Content-Type": "application/json"
+                }
+
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
+            }
+            try:
+                res = requests.post(url, headers=headers, json=payload, timeout=30)
+                if res.status_code == 200:
+                    data = res.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                else:
+                    last_error = f"[API Key - {m_name}] HTTP {res.status_code}: {res.text}"
+            except Exception as e:
+                last_error = str(e)
+                continue
 
     raise Exception(f"Gagal memanggil API Gemini. Detail: {last_error}")
 
@@ -306,7 +323,7 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
     return json.loads(match.group(0) if match else raw_text)
 
 # ==========================================
-# 4. CLIENT MODULE: THREADS API
+# 5. CLIENT MODULE: THREADS API
 # ==========================================
 class ThreadsAPI:
     BASE_URL = "https://graph.threads.net/v1.0"
@@ -422,7 +439,7 @@ def broadcast_post(all_registered_accounts: list, target_account_str: str, main_
     return results
 
 # ==========================================
-# 5. CLIENT MODULE: GOOGLE SHEETS
+# 6. CLIENT MODULE: GOOGLE SHEETS
 # ==========================================
 class SheetsManager:
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -521,7 +538,7 @@ class SheetsManager:
         self.sheet.delete_rows(row_num)
 
 # ==========================================
-# 6. BACKGROUND SCHEDULER ENGINE
+# 7. BACKGROUND SCHEDULER ENGINE
 # ==========================================
 def run_scheduler_job():
     accounts = load_accounts()
@@ -589,7 +606,7 @@ def initialize_background_scheduler():
 initialize_background_scheduler()
 
 # ==========================================
-# 7. STREAMLIT UI
+# 8. STREAMLIT UI
 # ==========================================
 st.set_page_config(page_title="Threads Shopee Auto-Poster Hub", layout="wide", page_icon="🚀")
 
@@ -942,7 +959,7 @@ with tab_settings:
         curr_s_id = get_config_val("SPREADSHEET_ID")
         curr_s_name = get_config_val("SHEET_NAME", "Sheet1")
 
-        val_gemini = st.text_input("Google Gemini API Key", value=curr_gemini, type="password")
+        val_gemini = st.text_input("Google Gemini API Key (Opsional - Terautentikasi Otomatis via Service Account)", value=curr_gemini, type="password")
         val_s_id = st.text_input("Google Spreadsheet ID", value=curr_s_id)
         val_s_name = st.text_input("Nama Worksheet / Tab Jadwal", value=curr_s_name)
 
@@ -960,7 +977,7 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi AI Gemini")
     if st.button("🔍 Uji Generator Gemini API", use_container_width=True):
-        with st.spinner("Mengecek respon AI dengan Key yang diinput..."):
+        with st.spinner("Mengecek autentikasi Service Account / Gemini API..."):
             try:
                 target_key = val_gemini.strip() if val_gemini else get_config_val("GEMINI_API_KEY")
                 test_resp = call_gemini_api_direct("Halo, buatkan 1 kalimat motivasi affiliate pendek.", api_key_override=target_key)
