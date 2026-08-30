@@ -70,10 +70,9 @@ def get_gcp_credentials_dict():
     return None
 
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
-    """Sanitizer ekstra kuat untuk mencegah error JSON kosong / char 0"""
+    """Pembersih JSON aman tanpa ketergantungan regex backtick rapuh"""
     if not raw_str or not str(raw_str).strip():
-        return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi produk terbaik untukmu hari ini!", "replies": []} for i in range(default_count)]
+        return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi produk terbaik untukmu!", "replies": []} for i in range(default_count)]
     
-    text = re.sub(r"<think>.*?</think>", "", raw_str, flags=re.DOTALL).strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\s*
+    text = re.sub(r"<think>[\s\S]*?</think>", "", str(raw_str)).strip()
+    text = text.replace("
