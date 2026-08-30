@@ -19,7 +19,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # 1. KONFIGURASI LOGGING & TIMEZONE
 # ==========================================
 LOG_FILE = "app_activity.log"
-ACCOUNTS_FILE = os.path.join(os.path.dirname(__file__), "accounts.json")
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 
 logging.basicConfig(
@@ -36,42 +35,49 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def get_config_val(key: str, default: str = "") -> str:
-    """Mengambil config dari Streamlit Secrets atau .env lokal"""
     if key in st.secrets:
         return str(st.secrets[key]).strip()
     return os.getenv(key, default).strip()
 
 def clean_private_key(raw_key: str) -> str:
-    """Membersihkan dan menyusun ulang struktur PEM Private Key"""
+    """Membersihkan dan memperbaiki padding Base64 PEM RSA Private Key"""
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
-    lines = [line.strip() for line in raw_key.split("\n") if line.strip()]
+    lines = [l.strip() for l in raw_key.split("\n") if l.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
+    body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+    
+    # Perbaiki kelipatan base64
+    rem = len(body) % 4
+    if rem > 0:
+        body += "=" * (4 - rem)
+
     chunks = [body[i:i+64] for i in range(0, len(body), 64)]
     return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
 
 def get_gcp_credentials_dict():
-    """Mengambil dictionary kredensial GCP dari secrets atau file lokal"""
-    if "gcp_service_account" in st.secrets:
-        cd = dict(st.secrets["gcp_service_account"])
-        if "private_key" in cd:
-            cd["private_key"] = clean_private_key(cd["private_key"])
-        return cd
-    elif "GCP_SERVICE_ACCOUNT" in st.secrets:
+    if "GCP_SERVICE_ACCOUNT" in st.secrets:
         raw = st.secrets["GCP_SERVICE_ACCOUNT"]
         cd = json.loads(raw) if isinstance(raw, str) else dict(raw)
         if "private_key" in cd:
             cd["private_key"] = clean_private_key(cd["private_key"])
         return cd
+    elif "gcp_service_account" in st.secrets:
+        cd = dict(st.secrets["gcp_service_account"])
+        if "private_key" in cd:
+            cd["private_key"] = clean_private_key(cd["private_key"])
+        return cd
     elif os.path.exists("credentials.json"):
         with open("credentials.json", "r") as f:
-            return json.load(f)
+            cd = json.load(f)
+            if "private_key" in cd:
+                cd["private_key"] = clean_private_key(cd["private_key"])
+            return cd
     return None
 
 # ==========================================
 # 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
-    """Membuka atau membuat tab 'Accounts' di Google Sheets"""
     s_id = get_config_val("SPREADSHEET_ID")
     creds_dict = get_gcp_credentials_dict()
     if not s_id or not creds_dict:
@@ -91,7 +97,6 @@ def get_accounts_worksheet():
         return None
 
 def load_accounts() -> list:
-    """Membaca akun tersimpan dari Google Sheets (tab Accounts)"""
     ws = get_accounts_worksheet()
     if ws:
         try:
@@ -109,7 +114,6 @@ def load_accounts() -> list:
     return []
 
 def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
-    """Menyimpan akun baru secara permanen ke Google Sheets"""
     ws = get_accounts_worksheet()
     if ws:
         ws.append_row([str(name).strip(), str(user_id).strip(), str(access_token).strip()])
@@ -117,7 +121,6 @@ def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
         raise Exception("Gagal terhubung ke Google Sheets.")
 
 def delete_account_from_sheets(name: str):
-    """Menghapus akun dari tab Google Sheets"""
     ws = get_accounts_worksheet()
     if ws:
         records = ws.get_all_records()
@@ -127,7 +130,7 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 3. DUAL-ENGINE AI GENERATOR (VERTEX AI + REST)
+# 3. UNIVERSAL AI ENGINE (GROQ + GEMINI)
 # ==========================================
 STYLE_PROMPTS = {
     "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan sudut pandang dan tone paling persuasif untuk memicu klik dan konversi affiliate.",
@@ -144,82 +147,46 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
-def call_vertex_ai_native(prompt: str, creds_dict: dict) -> str:
-    """Engine 1: Google Cloud Vertex AI Native (Memakai Service Account secara langsung)"""
-    project_id = creds_dict.get("project_id", "trhauto")
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    auth_req = google.auth.transport.requests.Request()
-    creds.refresh(auth_req)
-    token = creds.token
+def call_groq_api(prompt: str, api_key: str) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": "You are a professional social media affiliate copywriter specialized in Indonesian language Threads."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7
+    }
+    res = requests.post(url, headers=headers, json=payload, timeout=25)
+    if res.status_code == 200:
+        return res.json()["choices"][0]["message"]["content"].strip()
+    raise Exception(f"Groq API Error ({res.status_code}): {res.text}")
 
-    locations = ["us-central1", "asia-southeast1"]
-    models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-1.0-pro"]
+def call_gemini_rest(prompt: str, api_key: str) -> str:
+    models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+    for m in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+        headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.7}}
+        res = requests.post(url, headers=headers, json=payload, timeout=25)
+        if res.status_code == 200:
+            return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    raise Exception(f"Gemini API Error: {res.text}")
+
+def call_ai_engine(prompt: str, key_override: str = None) -> str:
+    key = key_override.strip() if key_override else get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY"))
     
-    last_err = ""
-    for loc in locations:
-        for m in models:
-            url = f"https://{loc}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{loc}/publishers/google/models/{m}:generateContent"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
-            }
-            try:
-                res = requests.post(url, headers=headers, json=payload, timeout=25)
-                if res.status_code == 200:
-                    data = res.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                else:
-                    last_err = f"Vertex AI [{loc}/{m}] HTTP {res.status_code}: {res.text}"
-            except Exception as e:
-                last_err = str(e)
-                continue
-    raise Exception(last_err)
-
-def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
-    """Engine Universal: Mencoba Vertex AI Service Account terlebih dahulu, lalu AI Studio API Key"""
-    creds_dict = get_gcp_credentials_dict()
-    errors = []
-
-    # 1. Coba lewat Vertex AI Native (GCP Service Account)
-    if creds_dict:
+    if key.startswith("gsk_"):
+        return call_groq_api(prompt, key)
+    elif key.startswith("AIzaSy"):
+        return call_gemini_rest(prompt, key)
+    elif key:
         try:
-            return call_vertex_ai_native(prompt, creds_dict)
-        except Exception as e_vertex:
-            errors.append(f"GCP Vertex Engine: {e_vertex}")
-
-    # 2. Coba lewat Google AI Studio REST API
-    api_key = api_key_override.strip() if api_key_override else get_config_val("GEMINI_API_KEY")
-    if api_key:
-        models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-pro"]
-        for m_name in models:
-            if api_key.startswith("AQ."):
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
-                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            else:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={api_key}"
-                headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
-
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
-            }
-            try:
-                res = requests.post(url, headers=headers, json=payload, timeout=25)
-                if res.status_code == 200:
-                    data = res.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                else:
-                    errors.append(f"AI Studio [{m_name}] HTTP {res.status_code}: {res.text}")
-            except Exception as e_studio:
-                errors.append(f"AI Studio [{m_name}]: {str(e_studio)}")
-                continue
-
-    raise Exception(" | ".join(errors) if errors else "Tidak ada metode autentikasi AI yang valid.")
+            return call_groq_api(prompt, key)
+        except Exception:
+            return call_gemini_rest(prompt, key)
+    raise ValueError("API Key AI belum disetel. Masukkan Groq API Key (gsk_...) atau Gemini API Key (AIzaSy...).")
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 5) -> list:
     style_inst = STYLE_PROMPTS.get(style_choice, "")
@@ -234,7 +201,7 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
     - Batasan Panjang Teks: {len_inst}
     - Jumlah Balasan (Reply) per Post: {reply_count} balasan (di luar post utama).
 
-    Format Output WAJIB JSON murni List of Objects:
+    Format Output WAJIB JSON murni List of Objects tanpa formatting markdown backticks:
     [
       {{
         "angle": "Sudut Pandang / Variasi (misal: Racun Diskon / Solusi Masalah)",
@@ -243,7 +210,7 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
       }}
     ]
     """
-    raw_text = call_gemini_api_direct(prompt)
+    raw_text = call_ai_engine(prompt)
     match = re.search(r"\[.*\]", raw_text, re.DOTALL)
     items = json.loads(match.group(0) if match else raw_text)
     
@@ -296,7 +263,7 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
       ]
     }}
     """
-    raw_text = call_gemini_api_direct(prompt)
+    raw_text = call_ai_engine(prompt)
     match = re.search(r"\{.*\}", raw_text, re.DOTALL)
     return json.loads(match.group(0) if match else raw_text)
 
@@ -616,7 +583,6 @@ with tab_studio:
         "🏆 Kurasi Multi-Produk (Top 3/5 Rekomendasi + Multi-Link)"
     ])
 
-    # ------------------ SUBTAB 1: SINGLE PRODUK (BATCH GENERATOR) ------------------
     with subtab_single_prod:
         st.subheader("Otomasi 1 Produk Menjadi Banyak Konten Berbeda Sudut Pandang")
         
@@ -631,7 +597,7 @@ with tab_studio:
         with c_tgt2:
             len_choice = st.selectbox("📏 Panjang Postingan:", list(LENGTH_CONSTRAINTS.keys()), index=1)
         with c_tgt3:
-            rep_choice = st.selectbox("🧵 Jumlah Reply per Post:", options=[0, 1, 2, 3, 4, 5], index=3, help="Jika 0, link langsung disematkan di postingan utama.")
+            rep_choice = st.selectbox("🧵 Jumlah Reply per Post:", options=[0, 1, 2, 3, 4, 5], index=3)
 
         col_p1, col_p2 = st.columns([1.2, 1.8])
         with col_p1:
@@ -640,28 +606,23 @@ with tab_studio:
             p_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto.jpg")
             p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()))
         with col_p2:
-            p_notes = st.text_area("Catatan / Keunggulan Produk:", placeholder="Bahan fleece halus tidak gerah, diskon 50% hari ini, ready ukuran jumbo...", height=90)
+            p_notes = st.text_area("Catatan / Keunggulan Produk:", placeholder="Bahan fleece halus tidak gerah, diskon 50% hari ini...", height=90)
             
             c_opt1, c_opt2, c_opt3, c_opt4 = st.columns([1, 1.2, 1.2, 1.2])
             with c_opt1:
                 p_qty = st.number_input("Jumlah Konten:", min_value=1, max_value=15, value=5, step=1)
             with c_opt2:
-                p_interval = st.selectbox(
-                    "Jeda Waktu Antar Post:",
-                    options=[1, 2, 3, 4, 6, 8, 12, 24],
-                    index=3,
-                    format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari (24 Jam)"
-                )
+                p_interval = st.selectbox("Jeda Antar Post:", options=[1, 2, 3, 4, 6, 8, 12, 24], index=3, format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari")
             with c_opt3:
                 p_start_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date())
             with c_opt4:
-                p_start_time = st.time_input("Mulai Jam / Waktu:", value=datetime.now(TZ_JAKARTA).time())
+                p_start_time = st.time_input("Mulai Jam:", value=datetime.now(TZ_JAKARTA).time())
 
         if st.button(f"🪄 Generate {p_qty} Konten Variatif & Siapkan Jadwal", use_container_width=True, type="primary"):
             if not p_name.strip():
                 st.error("Nama produk wajib diisi!")
             else:
-                with st.spinner(f"AI sedang meracik {p_qty} variasi postingan dengan gaya & hook berbeda..."):
+                with st.spinner(f"AI sedang meracik {p_qty} variasi postingan..."):
                     try:
                         batch_res = generate_bulk_single_product_threads(p_name, p_notes, p_link, p_style, len_choice, rep_choice, p_qty)
                         
@@ -687,7 +648,6 @@ with tab_studio:
                     except Exception as e:
                         st.error(f"Gagal generate: {e}")
 
-        # Tinjau dan Jadwalkan Batch
         if "single_batch_list" in st.session_state and st.session_state["single_batch_list"]:
             st.divider()
             st.markdown(f"#### 📋 Pratinjau & Edit Jadwal ({len(st.session_state['single_batch_list'])} Konten Siap Terbit)")
@@ -727,22 +687,17 @@ with tab_studio:
                             else:
                                 st.error(f"❌ Akun **{r['name']}**: Gagal ({r['error']})")
 
-    # ------------------ SUBTAB 2: KURASI TOP LIST (MULTI-LINK) ------------------
     with subtab_curation:
-        st.subheader("🏆 Buat Utas Kurasi / Rekomendasi (Setiap Reply Berisi Link Berbeda)")
+        st.subheader("🏆 Buat Utas Kurasi / Rekomendasi (Multi-Link Shopee)")
         
         c_k1, c_k2, c_k3 = st.columns([1.5, 1, 1])
         with c_k1:
-            cur_target_scope = st.selectbox(
-                "🎯 Target Akun Kurasi:",
-                options=["ALL (Cross-Post Semua Akun)"] + account_names_list,
-                key="cur_tgt_scope"
-            )
+            cur_target_scope = st.selectbox("🎯 Target Akun Kurasi:", options=["ALL (Cross-Post Semua Akun)"] + account_names_list, key="cur_tgt_scope")
             cur_selected_target = "ALL" if cur_target_scope.startswith("ALL") else cur_target_scope
         with c_k2:
-            cur_len_choice = st.selectbox("📏 Panjang Ulasan per Item:", list(LENGTH_CONSTRAINTS.keys()), index=1, key="cur_len")
+            cur_len_choice = st.selectbox("📏 Panjang Ulasan:", list(LENGTH_CONSTRAINTS.keys()), index=1, key="cur_len")
         with c_k3:
-            num_items = st.selectbox("📦 Jumlah Produk Rekomendasi:", options=[2, 3, 4, 5], index=1)
+            num_items = st.selectbox("📦 Jumlah Produk:", options=[2, 3, 4, 5], index=1)
 
         cur_topic = st.text_input("Topik / Judul Kurasi:", placeholder="Contoh: Top 3 Parfum Pria Wangi Mewah Tahan Seharian")
         cur_img = st.text_input("URL Gambar Utama Utas (Opsional):", placeholder="https://domain.com/foto_parfum.jpg")
@@ -925,18 +880,19 @@ with tab_settings:
     st.subheader("Konfigurasi API & AI Generator")
     
     with st.form("config_form"):
-        curr_gemini = get_config_val("GEMINI_API_KEY")
+        curr_ai_key = get_config_val("AI_API_KEY", get_config_val("GEMINI_API_KEY"))
         curr_s_id = get_config_val("SPREADSHEET_ID")
         curr_s_name = get_config_val("SHEET_NAME", "Sheet1")
 
-        val_gemini = st.text_input("Google Gemini API Key (Opsional - Terautentikasi Otomatis via Service Account)", value=curr_gemini, type="password")
+        val_ai_key = st.text_input("AI API Key (Groq `gsk_...` atau Gemini `AIzaSy...`)", value=curr_ai_key, type="password")
         val_s_id = st.text_input("Google Spreadsheet ID", value=curr_s_id)
         val_s_name = st.text_input("Nama Worksheet / Tab Jadwal", value=curr_s_name)
 
         if st.form_submit_button("💾 Simpan Konfigurasi ke .env (Lokal)", use_container_width=True):
             if not os.path.exists(ENV_PATH):
                 open(ENV_PATH, "w").close()
-            set_key(ENV_PATH, "GEMINI_API_KEY", val_gemini)
+            set_key(ENV_PATH, "AI_API_KEY", val_ai_key)
+            set_key(ENV_PATH, "GEMINI_API_KEY", val_ai_key)
             set_key(ENV_PATH, "SPREADSHEET_ID", val_s_id)
             set_key(ENV_PATH, "SHEET_NAME", val_s_name)
             set_key(ENV_PATH, "GOOGLE_CREDS_JSON", "credentials.json")
@@ -945,13 +901,13 @@ with tab_settings:
             st.rerun()
 
     st.divider()
-    st.write("#### 🧪 Uji Koneksi AI Gemini")
-    if st.button("🔍 Uji Generator Gemini API", use_container_width=True):
-        with st.spinner("Mengecek autentikasi Dual-Engine (Vertex AI / AI Studio)..."):
+    st.write("#### 🧪 Uji Koneksi Generator AI")
+    if st.button("🔍 Uji Generator AI Sekarang", use_container_width=True):
+        with st.spinner("Mengecek respon AI..."):
             try:
-                target_key = val_gemini.strip() if val_gemini else get_config_val("GEMINI_API_KEY")
-                test_resp = call_gemini_api_direct("Halo, buatkan 1 kalimat motivasi affiliate pendek.", api_key_override=target_key)
-                st.success(f"✅ Gemini AI Aktif & Merespons: \"{test_resp}\"")
+                target_key = val_ai_key.strip() if val_ai_key else None
+                test_resp = call_ai_engine("Halo, buatkan 1 kalimat motivasi affiliate pendek.", key_override=target_key)
+                st.success(f"✅ AI Engine Aktif & Merespons: \"{test_resp}\"")
             except Exception as e_test:
                 st.error(f"❌ Uji Gagal: {e_test}")
 
