@@ -1,0 +1,32 @@
+name: Threads Auto Poster Cron
+
+on:
+  schedule:
+    # Berjalan otomatis setiap 10 menit (UTC)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-poster:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests gspread google-auth pytz pandas
+
+      - name: Run Scheduler Worker
+        env:
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          GCP_CREDS_BASE64: ${{ secrets.GCP_CREDS_BASE64 }}
+        run: |
+          python worker.py
