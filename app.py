@@ -42,70 +42,42 @@ def get_config_val(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 def clean_private_key(raw_key: str) -> str:
-    """Membersihkan dan menyusun ulang struktur PEM Private Key secara otomatis"""
+    """Membersihkan dan menyusun ulang struktur PEM Private Key"""
     raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
     lines = [line.strip() for line in raw_key.split("\n") if line.strip()]
     body = "".join([l for l in lines if not l.startswith("-----")])
     chunks = [body[i:i+64] for i in range(0, len(body), 64)]
     return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
 
-# ==========================================
-# 2. OAUTH2 TOKEN GENERATOR (SERVICE ACCOUNT)
-# ==========================================
-def get_service_account_oauth_token() -> str:
-    """Membuat OAuth 2.0 Access Token langsung dari GCP Service Account yang ada di Secrets"""
-    try:
-        creds_dict = None
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-        elif "GCP_SERVICE_ACCOUNT" in st.secrets:
-            raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
-            creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
-        elif os.path.exists("credentials.json"):
-            with open("credentials.json", "r") as f:
-                creds_dict = json.load(f)
-
-        if creds_dict:
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
-            scopes = [
-                "https://www.googleapis.com/auth/generative-language",
-                "https://www.googleapis.com/auth/cloud-platform"
-            ]
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-            auth_req = google.auth.transport.requests.Request()
-            creds.refresh(auth_req)
-            return creds.token
-    except Exception as e:
-        logger.warning(f"Opsi Service Account OAuth2 fallback: {e}")
+def get_gcp_credentials_dict():
+    """Mengambil dictionary kredensial GCP dari secrets atau file lokal"""
+    if "gcp_service_account" in st.secrets:
+        cd = dict(st.secrets["gcp_service_account"])
+        if "private_key" in cd:
+            cd["private_key"] = clean_private_key(cd["private_key"])
+        return cd
+    elif "GCP_SERVICE_ACCOUNT" in st.secrets:
+        raw = st.secrets["GCP_SERVICE_ACCOUNT"]
+        cd = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        if "private_key" in cd:
+            cd["private_key"] = clean_private_key(cd["private_key"])
+        return cd
+    elif os.path.exists("credentials.json"):
+        with open("credentials.json", "r") as f:
+            return json.load(f)
     return None
 
 # ==========================================
-# 3. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
+# 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
     """Membuka atau membuat tab 'Accounts' di Google Sheets"""
     s_id = get_config_val("SPREADSHEET_ID")
-    c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
-    if not s_id:
+    creds_dict = get_gcp_credentials_dict()
+    if not s_id or not creds_dict:
         return None
     try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
-            creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
-        elif "GCP_SERVICE_ACCOUNT" in st.secrets:
-            raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
-            creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
-            creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
-        elif os.path.exists(c_json):
-            creds = Credentials.from_service_account_file(c_json, scopes=SheetsManager.SCOPES)
-        else:
-            return None
-
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(s_id)
         try:
@@ -155,7 +127,7 @@ def delete_account_from_sheets(name: str):
                 break
 
 # ==========================================
-# 4. AI GENERATOR ENGINE (HYBRID REST + OAUTH)
+# 3. DUAL-ENGINE AI GENERATOR (VERTEX AI + REST)
 # ==========================================
 STYLE_PROMPTS = {
     "🤖 Otomatis (AI Pintar Memilih)": "Pilihkan sudut pandang dan tone paling persuasif untuk memicu klik dan konversi affiliate.",
@@ -172,76 +144,82 @@ LENGTH_CONSTRAINTS = {
     "Panjang (Storytelling / 400-480 Karakter)": "Antara 400 hingga 480 karakter per post/reply (Maks 500 batas Threads), deskriptif dan mendalam."
 }
 
-def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
-    """Memanggil Gemini dengan prioritas OAuth2 Service Account -> Bearer API Key -> Query Param API Key"""
-    oauth_token = get_service_account_oauth_token()
-    raw_api_key = api_key_override.strip() if api_key_override else get_config_val("GEMINI_API_KEY")
+def call_vertex_ai_native(prompt: str, creds_dict: dict) -> str:
+    """Engine 1: Google Cloud Vertex AI Native (Memakai Service Account secara langsung)"""
+    project_id = creds_dict.get("project_id", "trhauto")
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    auth_req = google.auth.transport.requests.Request()
+    creds.refresh(auth_req)
+    token = creds.token
 
-    models_to_try = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash",
-        "gemini-1.5-pro",
-        "gemini-flash-latest"
-    ]
-
-    last_error = ""
-
-    # Jalur 1: Menggunakan Service Account OAuth 2.0 (Bypass semua blokir API Key)
-    if oauth_token:
-        for m_name in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
+    locations = ["us-central1", "asia-southeast1"]
+    models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-1.0-pro"]
+    
+    last_err = ""
+    for loc in locations:
+        for m in models:
+            url = f"https://{loc}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{loc}/publishers/google/models/{m}:generateContent"
             headers = {
-                "Authorization": f"Bearer {oauth_token}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
             }
             try:
-                res = requests.post(url, headers=headers, json=payload, timeout=30)
+                res = requests.post(url, headers=headers, json=payload, timeout=25)
                 if res.status_code == 200:
                     data = res.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 else:
-                    last_error = f"[OAuth ServiceAccount - {m_name}] HTTP {res.status_code}: {res.text}"
+                    last_err = f"Vertex AI [{loc}/{m}] HTTP {res.status_code}: {res.text}"
             except Exception as e:
-                last_error = str(e)
+                last_err = str(e)
                 continue
+    raise Exception(last_err)
 
-    # Jalur 2: Menggunakan API Key manual jika OAuth Service Account tidak tersedia
-    if raw_api_key:
-        for m_name in models_to_try:
-            if raw_api_key.startswith("AQ."):
+def call_gemini_api_direct(prompt: str, api_key_override: str = None) -> str:
+    """Engine Universal: Mencoba Vertex AI Service Account terlebih dahulu, lalu AI Studio API Key"""
+    creds_dict = get_gcp_credentials_dict()
+    errors = []
+
+    # 1. Coba lewat Vertex AI Native (GCP Service Account)
+    if creds_dict:
+        try:
+            return call_vertex_ai_native(prompt, creds_dict)
+        except Exception as e_vertex:
+            errors.append(f"GCP Vertex Engine: {e_vertex}")
+
+    # 2. Coba lewat Google AI Studio REST API
+    api_key = api_key_override.strip() if api_key_override else get_config_val("GEMINI_API_KEY")
+    if api_key:
+        models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-pro"]
+        for m_name in models:
+            if api_key.startswith("AQ."):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
-                headers = {
-                    "Authorization": f"Bearer {raw_api_key}",
-                    "Content-Type": "application/json"
-                }
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             else:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={raw_api_key}"
-                headers = {
-                    "x-goog-api-key": raw_api_key,
-                    "Content-Type": "application/json"
-                }
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={api_key}"
+                headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
 
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2800}
             }
             try:
-                res = requests.post(url, headers=headers, json=payload, timeout=30)
+                res = requests.post(url, headers=headers, json=payload, timeout=25)
                 if res.status_code == 200:
                     data = res.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 else:
-                    last_error = f"[API Key - {m_name}] HTTP {res.status_code}: {res.text}"
-            except Exception as e:
-                last_error = str(e)
+                    errors.append(f"AI Studio [{m_name}] HTTP {res.status_code}: {res.text}")
+            except Exception as e_studio:
+                errors.append(f"AI Studio [{m_name}]: {str(e_studio)}")
                 continue
 
-    raise Exception(f"Gagal memanggil API Gemini. Detail: {last_error}")
+    raise Exception(" | ".join(errors) if errors else "Tidak ada metode autentikasi AI yang valid.")
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 5) -> list:
     style_inst = STYLE_PROMPTS.get(style_choice, "")
@@ -323,7 +301,7 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
     return json.loads(match.group(0) if match else raw_text)
 
 # ==========================================
-# 5. CLIENT MODULE: THREADS API
+# 4. CLIENT MODULE: THREADS API
 # ==========================================
 class ThreadsAPI:
     BASE_URL = "https://graph.threads.net/v1.0"
@@ -439,7 +417,7 @@ def broadcast_post(all_registered_accounts: list, target_account_str: str, main_
     return results
 
 # ==========================================
-# 6. CLIENT MODULE: GOOGLE SHEETS
+# 5. CLIENT MODULE: GOOGLE SHEETS
 # ==========================================
 class SheetsManager:
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -455,21 +433,13 @@ class SheetsManager:
         self.sheet = self._connect()
 
     def _connect(self):
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
-            creds = Credentials.from_service_account_info(creds_dict, scopes=self.SCOPES)
-        elif "GCP_SERVICE_ACCOUNT" in st.secrets:
-            raw_gcp = st.secrets["GCP_SERVICE_ACCOUNT"]
-            creds_dict = json.loads(raw_gcp) if isinstance(raw_gcp, str) else dict(raw_gcp)
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = clean_private_key(creds_dict["private_key"])
+        creds_dict = get_gcp_credentials_dict()
+        if creds_dict:
             creds = Credentials.from_service_account_info(creds_dict, scopes=self.SCOPES)
         elif os.path.exists(self.creds_path):
             creds = Credentials.from_service_account_file(self.creds_path, scopes=self.SCOPES)
         else:
-            raise FileNotFoundError("Kredensial GCP tidak ditemukan.")
+            raise FileNotFoundError("Kredensial GCP tidak ditemukan di Secrets maupun credentials.json.")
 
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(self.spreadsheet_id)
@@ -538,7 +508,7 @@ class SheetsManager:
         self.sheet.delete_rows(row_num)
 
 # ==========================================
-# 7. BACKGROUND SCHEDULER ENGINE
+# 6. BACKGROUND SCHEDULER ENGINE
 # ==========================================
 def run_scheduler_job():
     accounts = load_accounts()
@@ -606,7 +576,7 @@ def initialize_background_scheduler():
 initialize_background_scheduler()
 
 # ==========================================
-# 8. STREAMLIT UI
+# 7. STREAMLIT UI
 # ==========================================
 st.set_page_config(page_title="Threads Shopee Auto-Poster Hub", layout="wide", page_icon="🚀")
 
@@ -977,7 +947,7 @@ with tab_settings:
     st.divider()
     st.write("#### 🧪 Uji Koneksi AI Gemini")
     if st.button("🔍 Uji Generator Gemini API", use_container_width=True):
-        with st.spinner("Mengecek autentikasi Service Account / Gemini API..."):
+        with st.spinner("Mengecek autentikasi Dual-Engine (Vertex AI / AI Studio)..."):
             try:
                 target_key = val_gemini.strip() if val_gemini else get_config_val("GEMINI_API_KEY")
                 test_resp = call_gemini_api_direct("Halo, buatkan 1 kalimat motivasi affiliate pendek.", api_key_override=target_key)
