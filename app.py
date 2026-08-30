@@ -34,49 +34,69 @@ load_dotenv(ENV_PATH, override=True)
 TZ_JAKARTA = pytz.timezone("Asia/Jakarta")
 
 def clean_ascii_str(text: str) -> str:
-    """Membersihkan seluruh whitespace tersembunyi / non-ascii"""
     if not text:
         return ""
     return re.sub(r"[^\x20-\x7E]", "", str(text)).strip()
 
 def get_config_val(key: str, default: str = "") -> str:
-    if key in st.secrets:
-        return clean_ascii_str(str(st.secrets[key]))
+    try:
+        if key in st.secrets:
+            return clean_ascii_str(str(st.secrets[key]))
+    except Exception:
+        pass
     return clean_ascii_str(os.getenv(key, default))
 
 def clean_private_key(raw_key: str) -> str:
-    raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
-    lines = [l.strip() for l in raw_key.split("\n") if l.strip()]
-    body = "".join([l for l in lines if not l.startswith("-----")])
-    body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
-    rem = len(body) % 4
-    if rem > 0:
-        body += "=" * (4 - rem)
-    chunks = [body[i:i+64] for i in range(0, len(body), 64)]
-    return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
+    try:
+        raw_key = str(raw_key).replace("\\n", "\n").replace("\r", "").strip()
+        lines = [l.strip() for l in raw_key.split("\n") if l.strip()]
+        body = "".join([l for l in lines if not l.startswith("-----")])
+        body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+        rem = len(body) % 4
+        if rem > 0:
+            body += "=" * (4 - rem)
+        chunks = [body[i:i+64] for i in range(0, len(body), 64)]
+        return "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
+    except Exception:
+        return str(raw_key)
 
 def get_gcp_credentials_dict():
-    if "GCP_SERVICE_ACCOUNT" in st.secrets:
-        raw = st.secrets["GCP_SERVICE_ACCOUNT"]
-        cd = json.loads(raw) if isinstance(raw, str) else dict(raw)
-        if "private_key" in cd:
-            cd["private_key"] = clean_private_key(cd["private_key"])
-        return cd
-    elif "gcp_service_account" in st.secrets:
-        cd = dict(st.secrets["gcp_service_account"])
-        if "private_key" in cd:
-            cd["private_key"] = clean_private_key(cd["private_key"])
-        return cd
-    elif os.path.exists("credentials.json"):
-        with open("credentials.json", "r") as f:
-            cd = json.load(f)
+    """Parser Kredensial GCP Kebal Crash (Mendukung Format TOML Table & String JSON)"""
+    try:
+        # 1. Cek format GCP_SERVICE_ACCOUNT (String JSON)
+        if "GCP_SERVICE_ACCOUNT" in st.secrets:
+            raw = st.secrets["GCP_SERVICE_ACCOUNT"]
+            if isinstance(raw, str):
+                raw_str = raw.strip()
+                if raw_str.startswith("{") and raw_str.endswith("}"):
+                    cd = json.loads(raw_str)
+                else:
+                    cd = None
+            else:
+                cd = dict(raw)
+            if cd and isinstance(cd, dict) and "private_key" in cd:
+                cd["private_key"] = clean_private_key(cd["private_key"])
+                return cd
+
+        # 2. Cek format [gcp_service_account] (TOML Table)
+        if "gcp_service_account" in st.secrets:
+            cd = dict(st.secrets["gcp_service_account"])
             if "private_key" in cd:
                 cd["private_key"] = clean_private_key(cd["private_key"])
-            return cd
+                return cd
+
+        # 3. Cek file credentials.json lokal
+        if os.path.exists("credentials.json"):
+            with open("credentials.json", "r") as f:
+                cd = json.load(f)
+                if "private_key" in cd:
+                    cd["private_key"] = clean_private_key(cd["private_key"])
+                return cd
+    except Exception as e:
+        logger.warning(f"Kredensial GCP belum terbaca sempurna: {e}")
     return None
 
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
-    """Pembersih output JSON dari AI dengan fallback aman"""
     if not raw_str or not str(raw_str).strip():
         return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi produk terbaik untukmu!", "replies": []} for i in range(default_count)]
     
@@ -110,7 +130,6 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
     except Exception:
         pass
 
-    # Fallback teks ke objek data jika AI merespons di luar struktur JSON
     blocks = [b.strip() for b in text.split("\n\n") if len(b.strip()) > 20]
     fallback_res = []
     for idx, b in enumerate(blocks[:default_count]):
@@ -125,11 +144,11 @@ def extract_and_parse_json(raw_str: str, default_count: int = 3):
 # 2. HELPER DATA MULTI-AKUN (GOOGLE SHEETS)
 # ==========================================
 def get_accounts_worksheet():
-    s_id = get_config_val("SPREADSHEET_ID")
-    creds_dict = get_gcp_credentials_dict()
-    if not s_id or not creds_dict:
-        return None
     try:
+        s_id = clean_ascii_str(get_config_val("SPREADSHEET_ID"))
+        creds_dict = get_gcp_credentials_dict()
+        if not s_id or not creds_dict:
+            return None
         creds = Credentials.from_service_account_info(creds_dict, scopes=SheetsManager.SCOPES)
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(s_id)
@@ -140,24 +159,24 @@ def get_accounts_worksheet():
             ws.append_row(["name", "user_id", "access_token"])
             return ws
     except Exception as e:
-        logger.error(f"Gagal konek ke tab Accounts: {e}")
+        logger.warning(f"Akses tab Accounts tertunda: {e}")
         return None
 
 def load_accounts() -> list:
-    ws = get_accounts_worksheet()
-    if ws:
-        try:
+    try:
+        ws = get_accounts_worksheet()
+        if ws:
             records = ws.get_all_records()
             return [r for r in records if str(r.get("user_id", "")).strip() != ""]
-        except Exception:
-            pass
+    except Exception:
+        pass
             
-    if "ACCOUNTS_JSON" in st.secrets:
-        try:
+    try:
+        if "ACCOUNTS_JSON" in st.secrets:
             val = st.secrets["ACCOUNTS_JSON"]
             return json.loads(val) if isinstance(val, str) else val
-        except Exception:
-            pass
+    except Exception:
+        pass
     return []
 
 def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
@@ -165,7 +184,7 @@ def save_new_account_to_sheets(name: str, user_id: str, access_token: str):
     if ws:
         ws.append_row([clean_ascii_str(name), clean_ascii_str(user_id), clean_ascii_str(access_token)])
     else:
-        raise Exception("Gagal terhubung ke Google Sheets. Pastikan Service Account sudah dijadikan Editor.")
+        raise Exception("Gagal terhubung ke Google Sheets. Pastikan format GCP Secret sudah valid dan diberi izin Editor.")
 
 def delete_account_from_sheets(name: str):
     ws = get_accounts_worksheet()
@@ -195,7 +214,6 @@ LENGTH_CONSTRAINTS = {
 }
 
 def get_groq_active_models(clean_key: str) -> list:
-    """Mengambil daftar model yang benar-benar aktif di akun pengguna langsung dari API Groq"""
     url = "https://api.groq.com/openai/v1/models"
     headers = {"Authorization": f"Bearer {clean_key}"}
     try:
@@ -220,15 +238,12 @@ def call_groq_api(prompt: str, api_key: str) -> str:
         "Content-Type": "application/json"
     }
     
-    # 1. Ambil model yang aktif di akun saat ini
     models = get_groq_active_models(clean_key)
     if not models:
-        # Fallback list jika discovery gagal
         models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b", "gemma2-9b-it"]
 
     err_list = []
     
-    # 2. Coba jalankan dengan JSON Schema
     for m in models:
         payload = {
             "model": m,
@@ -251,7 +266,6 @@ def call_groq_api(prompt: str, api_key: str) -> str:
             err_list.append(f"[{m}]: {str(e)}")
             continue
 
-    # 3. Coba jalankan format standar jika response_format ditolak
     for m in models:
         try:
             payload_raw = {
