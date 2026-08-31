@@ -97,7 +97,7 @@ def get_gcp_credentials_dict():
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
     """Pembersih output JSON dari AI"""
     if not raw_str or not str(raw_str).strip():
-        return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi produk terbaik untukmu!", "replies": []} for i in range(default_count)]
+        return [{"angle": f"Variasi #{i+1}", "main_text": "Konten engagement terbaik untuk audiensmu!", "replies": []} for i in range(default_count)]
     
     text = str(raw_str).strip()
     text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
@@ -210,7 +210,7 @@ def delete_account_from_sheets(name: str):
 # ==========================================
 # 3. AI ENGINE (DYNAMIC GEMINI DISCOVERY)
 # ==========================================
-STYLE_PROMPTS = {
+STYLE_PROMPTS_AFFILIATE = {
     "🎲 Diserahkan ke AI (AI Bebas Memilih Tone Terbaik)": (
         "Bebaskan AI untuk menganalisis karakteristik produk dan memilih gaya bahasa, sudut pandang, "
         "serta hook yang paling efektif, relate, viral, dan natural di linimasa Threads Indonesia."
@@ -232,6 +232,27 @@ STYLE_PROMPTS = {
     ),
     "🤣 Humor & Relate Linimasa": (
         "Gaya santai bercanda, self-deprecating humor yang relate sama kehidupan sehari-hari anak muda/pekerja."
+    )
+}
+
+STYLE_PROMPTS_VIRAL = {
+    "🎲 Diserahkan ke AI (AI Pilih Format Paling Viral)": (
+        "Analisis topik dan pilih format hook linimasa Threads Indonesia yang paling berpotensi memicu puluhan/ratusan komentar, debat sehat, dan repost."
+    ),
+    "💬 Pancingan Diskusi / Pertanyaan Dilematis": (
+        "Gaya pertanyaan santai tapi memancing pendapat netizen, misal: perbandingan kebiasaan, pilihan hidup, atau situasi kerja yang bikin orang gatal ingin ikut komentar."
+    ),
+    "😭 Curhat Kehidupan Relatable / Dunia Kerja": (
+        "Gaya orang pertama curhat santai tentang realita hidup, lika-liku kantor/karir, hubungan sosial, atau struggle harian yang sangat relate bagi banyak orang."
+    ),
+    "💣 Unpopular Opinion / Hot Take Berani": (
+        "Sudut pandang kontroversial/berani yang melawan opini umum namun tetap logis dan sopan, memicu interaksi pro-kontra di kolom balasan."
+    ),
+    "🤯 Fakta Menarik / Storytelling Plot Twist": (
+        "Mulai dengan hook mencengangkan atau cerita singkat menarik yang membuat pembaca penasaran dan membaca sampai tuntas."
+    ),
+    "🤣 Humor Receh / Sindiran Realita": (
+        "Gaya bercanda linimasa santai, lucu, relate, dan memicu tawa netizen."
     )
 }
 
@@ -299,7 +320,7 @@ def call_ai_engine(prompt: str, key_override: str = None) -> str:
     return call_gemini_api(prompt, key)
 
 def generate_bulk_single_product_threads(product_name: str, product_notes: str, affiliate_link: str, style_choice: str, length_choice: str, reply_count: int, count: int = 3) -> list:
-    style_inst = STYLE_PROMPTS.get(style_choice, STYLE_PROMPTS["🎲 Diserahkan ke AI (AI Bebas Memilih Tone Terbaik)"])
+    style_inst = STYLE_PROMPTS_AFFILIATE.get(style_choice, STYLE_PROMPTS_AFFILIATE["🎲 Diserahkan ke AI (AI Bebas Memilih Tone Terbaik)"])
     len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
     
     prompt = (
@@ -396,6 +417,57 @@ def generate_curated_listicle_thread(curation_topic: str, items: list, length_ch
         reps = []
         
     return {"main_text": main_text, "replies": reps}
+
+def generate_viral_engagement_threads(topic: str, context_notes: str, viral_style: str, length_choice: str, reply_count: int, count: int = 3) -> list:
+    style_inst = STYLE_PROMPTS_VIRAL.get(viral_style, STYLE_PROMPTS_VIRAL["🎲 Diserahkan ke AI (AI Pilih Format Paling Viral)"])
+    len_inst = LENGTH_CONSTRAINTS.get(length_choice, "Maksimal 350 karakter.")
+    
+    prompt = (
+        f"Kamu adalah Content Creator Threads Indonesia dengan engagement rate sangat tinggi. "
+        f"Tulis {count} postingan Threads yang SANGAT ALAMI, GAUL, dan MEMICU INTERAKSI/KOMENTAR RAMAI untuk tema berikut:\n"
+        f"- Topik / Tema: {topic}\n"
+        f"- Konteks / Catatan Tambahan: {context_notes if context_notes else 'Topik yang sedang relevan dan hangat di linimasa'}\n"
+        f"- Gaya Hook: {style_inst}\n"
+        f"- Batasan Panjang: {len_inst}\n"
+        f"- Jumlah Reply di bawah post utama: {reply_count} balasan (misal pertanyaan pemicu diskusi atau sambungan pemikiran).\n"
+        f"- PENTING: Konten ini MURNI UNTUK ENGAGEMENT ORGANIK. JANGAN masukkan link produk atau affiliate apapun!\n\n"
+        "Format Output WAJIB JSON murni persis seperti ini:\n"
+        "{\n"
+        '  "items": [\n'
+        "    {\n"
+        '      "angle": "Sudut Pandang / Variasi",\n'
+        f'      "main_text": "Teks post utama ({len_inst})",\n'
+        f'      "replies": ["Teks balasan pendukung ({len_inst})"]\n'
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
+    raw_text = call_ai_engine(prompt)
+    items = extract_and_parse_json(raw_text, default_count=count)
+    
+    processed_items = []
+    for idx, item in enumerate(items):
+        if isinstance(item, dict):
+            main_txt = str(item.get("main_text", item.get("text", item.get("post", ""))))
+            raw_reps = item.get("replies", item.get("balasan", []))
+            reps = [str(r) for r in raw_reps] if isinstance(raw_reps, list) else ([str(raw_reps)] if str(raw_reps).strip() else [])
+            angle_name = str(item.get("angle", item.get("judul", f"Variasi #{idx+1}")))
+        elif isinstance(item, str):
+            main_txt = item
+            reps = []
+            angle_name = f"Variasi #{idx+1}"
+        else:
+            main_txt = str(item)
+            reps = []
+            angle_name = f"Variasi #{idx+1}"
+
+        processed_items.append({
+            "angle": angle_name,
+            "main_text": main_txt,
+            "replies": reps[:reply_count]
+        })
+        
+    return processed_items
 
 # ==========================================
 # 4. CLIENT MODULE: THREADS API
@@ -719,11 +791,15 @@ with tab_studio:
     if not active_accounts:
         st.warning("⚠️ Belum ada akun Threads terdaftar. Silakan tambahkan di tab **👥 Multi-Account**.")
     
-    subtab_single_prod, subtab_curation = st.tabs([
-        "🛍️ Single Produk (Multi-Konten & Auto-Jadwal)", 
-        "🏆 Kurasi Multi-Produk (Top 3/5 Rekomendasi + Multi-Link)"
+    subtab_single_prod, subtab_curation, subtab_viral = st.tabs([
+        "🛍️ Single Produk (Affiliate Multi-Konten)", 
+        "🏆 Kurasi Rekomendasi (Multi-Link Shopee)",
+        "🔥 Viral Booster (Pemicu Komentar & Engagement)"
     ])
 
+    # ------------------------------------------------
+    # SUBTAB 1: SINGLE PRODUK AFFILIATE
+    # ------------------------------------------------
     with subtab_single_prod:
         st.subheader("Otomasi 1 Produk Menjadi Banyak Konten Berbeda Sudut Pandang")
         
@@ -732,38 +808,38 @@ with tab_studio:
             target_scope = st.selectbox(
                 "🎯 Target Akun Publikasi:",
                 options=["ALL (Cross-Post Semua Akun)"] + account_names_list,
-                help="Pilih apakah ingin diposting ke semua akun atau akun niche tertentu."
+                key="sp_target_scope"
             )
             selected_target_str = "ALL" if target_scope.startswith("ALL") else target_scope
         with c_tgt2:
-            len_choice = st.selectbox("📏 Panjang Postingan:", list(LENGTH_CONSTRAINTS.keys()), index=1)
+            len_choice = st.selectbox("📏 Panjang Postingan:", list(LENGTH_CONSTRAINTS.keys()), index=1, key="sp_len")
         with c_tgt3:
-            rep_choice = st.selectbox("🧵 Jumlah Reply per Post:", options=[0, 1, 2, 3, 4, 5], index=1)
+            rep_choice = st.selectbox("🧵 Jumlah Reply per Post:", options=[0, 1, 2, 3, 4, 5], index=1, key="sp_rep")
 
         col_p1, col_p2 = st.columns([1.2, 1.8])
         with col_p1:
             p_name = st.text_input("Nama Produk", placeholder="Contoh: ESQA Minimalist Blurring Serum Skin Tint")
             p_link = st.text_input("Link Shopee Affiliate", placeholder="https://s.shopee.co.id/xxxx")
             p_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto.jpg")
-            p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS.keys()), index=0)
+            p_style = st.selectbox("Gaya Penulisan AI:", list(STYLE_PROMPTS_AFFILIATE.keys()), index=0)
         with col_p2:
             p_notes = st.text_area("Catatan / Keunggulan Produk:", placeholder="Ringan, SPF 35, menyamarkan pori...", height=90)
             
             c_opt1, c_opt2, c_opt3, c_opt4 = st.columns([1, 1.2, 1.2, 1.2])
             with c_opt1:
-                p_qty = st.number_input("Jumlah Konten:", min_value=1, max_value=15, value=3, step=1)
+                p_qty = st.number_input("Jumlah Konten:", min_value=1, max_value=15, value=3, step=1, key="sp_qty")
             with c_opt2:
-                p_interval = st.selectbox("Jeda Antar Post:", options=[1, 2, 3, 4, 6, 8, 12, 24], index=1, format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari")
+                p_interval = st.selectbox("Jeda Antar Post:", options=[1, 2, 3, 4, 6, 8, 12, 24], index=1, format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari", key="sp_interval")
             with c_opt3:
-                p_start_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date())
+                p_start_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date(), key="sp_date")
             with c_opt4:
-                p_start_time = st.time_input("Mulai Jam:", value=datetime.now(TZ_JAKARTA).time())
+                p_start_time = st.time_input("Mulai Jam:", value=datetime.now(TZ_JAKARTA).time(), key="sp_time")
 
-        if st.button(f"🪄 Generate {p_qty} Konten Variatif & Siapkan Jadwal", use_container_width=True, type="primary"):
+        if st.button(f"🪄 Generate {p_qty} Konten Affiliate & Siapkan Jadwal", use_container_width=True, type="primary"):
             if not p_name.strip():
                 st.error("Nama produk wajib diisi!")
             else:
-                with st.spinner(f"Gemini sedang meracik {p_qty} postingan yang gaul & relate..."):
+                with st.spinner(f"Gemini sedang meracik {p_qty} variasi postingan..."):
                     try:
                         batch_res = generate_bulk_single_product_threads(p_name, p_notes, p_link, p_style, len_choice, rep_choice, p_qty)
                         
@@ -828,6 +904,9 @@ with tab_studio:
                             else:
                                 st.error(f"❌ Akun **{r['name']}**: Gagal ({r['error']})")
 
+    # ------------------------------------------------
+    # SUBTAB 2: KURASI MULTI-PRODUK
+    # ------------------------------------------------
     with subtab_curation:
         st.subheader("🏆 Buat Utas Kurasi / Rekomendasi (Multi-Link Shopee)")
         
@@ -906,6 +985,112 @@ with tab_studio:
                     st.rerun()
                 except Exception as ex:
                     st.error(f"Gagal simpan: {ex}")
+
+    # ------------------------------------------------
+    # SUBTAB 3: VIRAL ENGAGEMENT BOOSTER (NON-AFFILIATE)
+    # ------------------------------------------------
+    with subtab_viral:
+        st.subheader("🔥 Buat Postingan Organik Pemancing Komentar & Engagement")
+        
+        c_v1, c_v2, c_v3 = st.columns([1.5, 1, 1])
+        with c_v1:
+            viral_target_scope = st.selectbox(
+                "🎯 Target Akun Publikasi:",
+                options=["ALL (Cross-Post Semua Akun)"] + account_names_list,
+                key="viral_target_scope"
+            )
+            viral_selected_target = "ALL" if viral_target_scope.startswith("ALL") else viral_target_scope
+        with c_v2:
+            viral_len_choice = st.selectbox("📏 Panjang Postingan:", list(LENGTH_CONSTRAINTS.keys()), index=1, key="viral_len")
+        with c_v3:
+            viral_rep_choice = st.selectbox("🧵 Jumlah Reply Sambungan:", options=[0, 1, 2, 3, 4], index=1, key="viral_rep")
+
+        col_vr1, col_vr2 = st.columns([1.2, 1.8])
+        with col_vr1:
+            viral_topic = st.text_input("Topik / Tema Diskusi", placeholder="Contoh: Realita kerja remote vs WFO / Overthinking usia 25+")
+            viral_img = st.text_input("URL Gambar (Opsional)", placeholder="https://domain.com/foto_meme.jpg", key="viral_img")
+            viral_style = st.selectbox("Gaya Hook Viral:", list(STYLE_PROMPTS_VIRAL.keys()), index=0)
+        with col_vr2:
+            viral_notes = st.text_area("Poin / Cerita / Opini Tambahan:", placeholder="Misal: banyak yang bilang WFO lebih produktif, tapi waktu di jalan habis 3 jam...", height=90)
+            
+            c_vo1, c_vo2, c_vo3, c_vo4 = st.columns([1, 1.2, 1.2, 1.2])
+            with c_vo1:
+                viral_qty = st.number_input("Jumlah Konten:", min_value=1, max_value=15, value=3, step=1, key="viral_qty")
+            with c_vo2:
+                viral_interval = st.selectbox("Jeda Antar Post:", options=[1, 2, 3, 4, 6, 8, 12, 24], index=1, format_func=lambda x: f"Setiap {x} Jam" if x < 24 else "Setiap 1 Hari", key="viral_interval")
+            with c_vo3:
+                viral_start_date = st.date_input("Mulai Tanggal:", value=datetime.now(TZ_JAKARTA).date(), key="viral_date")
+            with c_vo4:
+                viral_start_time = st.time_input("Mulai Jam:", value=datetime.now(TZ_JAKARTA).time(), key="viral_time")
+
+        if st.button(f"🪄 Generate {viral_qty} Konten Viral & Siapkan Jadwal", use_container_width=True, type="primary"):
+            if not viral_topic.strip():
+                st.error("Topik atau tema diskusi wajib diisi!")
+            else:
+                with st.spinner(f"Gemini sedang meracik {viral_qty} postingan pemancing interaksi..."):
+                    try:
+                        viral_batch_res = generate_viral_engagement_threads(viral_topic, viral_notes, viral_style, viral_len_choice, viral_rep_choice, viral_qty)
+                        
+                        start_base_dt = TZ_JAKARTA.localize(datetime.combine(viral_start_date, viral_start_time))
+                        scheduled_viral_batch = []
+                        
+                        for idx, item in enumerate(viral_batch_res):
+                            post_dt = start_base_dt + timedelta(hours=(idx * viral_interval))
+                            scheduled_viral_batch.append({
+                                "schedule_date": post_dt.strftime("%Y-%m-%d"),
+                                "schedule_time": post_dt.strftime("%H:%M"),
+                                "target_accounts": viral_selected_target,
+                                "angle": item.get("angle", f"Variasi Viral #{idx+1}"),
+                                "main_text": item.get("main_text", ""),
+                                "main_image_url": viral_img,
+                                "reply_text": " ||| ".join(item.get("replies", [])),
+                                "affiliate_link": "Viral Engagement (Non-Affiliate)",
+                                "status": "PENDING"
+                            })
+                        
+                        st.session_state["viral_batch_list"] = scheduled_viral_batch
+                        st.success(f"✅ Berhasil membuat {len(scheduled_viral_batch)} postingan viral!")
+                    except Exception as e:
+                        st.error(f"Gagal generate: {e}")
+
+        if "viral_batch_list" in st.session_state and st.session_state["viral_batch_list"]:
+            st.divider()
+            st.markdown(f"#### 📋 Pratinjau & Edit Jadwal ({len(st.session_state['viral_batch_list'])} Konten Viral Siap Terbit)")
+            
+            for i, p_item in enumerate(st.session_state["viral_batch_list"]):
+                with st.expander(f"📌 Post #{i+1} | Jadwal: {p_item['schedule_date']} {p_item['schedule_time']} WIB | ({p_item['angle']})", expanded=(i == 0)):
+                    p_item["main_text"] = st.text_area(f"Post Utama #{i+1}", value=p_item["main_text"], key=f"v_main_{i}", height=80)
+                    if p_item["reply_text"]:
+                        p_item["reply_text"] = st.text_input(f"Balasan Rantai Pendukung (Pisahkan dengan |||)", value=p_item["reply_text"], key=f"v_rep_{i}")
+
+            col_vb1, col_vb2 = st.columns(2)
+            with col_vb1:
+                if st.button(f"📥 Masukkan Semua ({len(st.session_state['viral_batch_list'])} Post Viral) ke Google Sheets", use_container_width=True, type="primary"):
+                    try:
+                        s_id = get_config_val("SPREADSHEET_ID")
+                        s_name = get_config_val("SHEET_NAME", "Sheet1")
+                        c_json = get_config_val("GOOGLE_CREDS_JSON", "credentials.json")
+                        sheets = SheetsManager(c_json, s_id, s_name)
+                        
+                        sheets.append_rows_batch(st.session_state["viral_batch_list"])
+                        st.success("🎉 Seluruh postingan viral berhasil dijadwalkan ke Google Sheets!")
+                        del st.session_state["viral_batch_list"]
+                        time.sleep(1.2)
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Gagal simpan ke Google Sheets: {ex}")
+
+            with col_vb2:
+                if st.button("⚡ Post Konten Viral Pertama Sekarang (Direct)", use_container_width=True, disabled=(len(active_accounts) == 0)):
+                    first_item = st.session_state["viral_batch_list"][0]
+                    with st.spinner("Memposting ke Threads..."):
+                        rep_arr = [r.strip() for r in first_item["reply_text"].split("|||") if r.strip()]
+                        b_res = broadcast_post(active_accounts, viral_selected_target, first_item["main_text"], first_item["main_image_url"], rep_arr)
+                        for r in b_res:
+                            if r["success"]:
+                                st.success(f"✅ Akun **{r['name']}**: Berhasil diposting!")
+                            else:
+                                st.error(f"❌ Akun **{r['name']}**: Gagal ({r['error']})")
 
 # ----------------------------------------------------
 # TAB 2: QUEUE & SHEETS
