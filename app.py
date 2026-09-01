@@ -97,7 +97,7 @@ def get_gcp_credentials_dict():
 def extract_and_parse_json(raw_str: str, default_count: int = 3):
     """Pembersih output JSON dari AI"""
     if not raw_str or not str(raw_str).strip():
-        return [{"angle": f"Variasi #{i+1}", "main_text": "Konten engagement terbaik untuk audiensmu!", "replies": []} for i in range(default_count)]
+        return [{"angle": f"Variasi #{i+1}", "main_text": "Rekomendasi terbaik untukmu!", "replies": []} for i in range(default_count)]
     
     text = str(raw_str).strip()
     text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
@@ -331,6 +331,8 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
         f"- Gaya Bahasa: {style_inst}\n"
         f"- Batasan Panjang: {len_inst}\n"
         f"- Jumlah Reply di bawah postingan utama: {reply_count} balasan.\n\n"
+        "ATURAN PENTING:\n"
+        "- JANGAN PERNAH menuliskan link, URL, atau kata 's.shopee.co.id' di dalam output AI (link akan ditempel otomatis oleh sistem).\n\n"
         "Format Output WAJIB JSON murni persis seperti ini:\n"
         "{\n"
         '  "items": [\n'
@@ -361,8 +363,11 @@ def generate_bulk_single_product_threads(product_name: str, product_notes: str, 
             reps = []
             angle_name = f"Variasi #{idx+1}"
 
-        reps = reps[:reply_count]
+        # Bersihkan jika ada link liar yang dibuat otomatis oleh AI
+        main_txt = re.sub(r"https?://\S+|s\.shopee\.co\.id/\S+", "", main_txt).strip()
+        reps = [re.sub(r"https?://\S+|s\.shopee\.co\.id/\S+", "", r).strip() for r in reps[:reply_count]]
         
+        # Tempelkan HANYA 1 link resmi
         if reply_count == 0:
             if affiliate_link:
                 main_txt = f"{main_txt}\n\n👉 Spill link beli: {affiliate_link}"
@@ -461,10 +466,14 @@ def generate_viral_engagement_threads(topic: str, context_notes: str, viral_styl
             reps = []
             angle_name = f"Variasi #{idx+1}"
 
+        # Bersihkan jika ada link liar
+        main_txt = re.sub(r"https?://\S+|s\.shopee\.co\.id/\S+", "", main_txt).strip()
+        reps = [re.sub(r"https?://\S+|s\.shopee\.co\.id/\S+", "", r).strip() for r in reps[:reply_count]]
+
         processed_items.append({
             "angle": angle_name,
             "main_text": main_txt,
-            "replies": reps[:reply_count]
+            "replies": reps
         })
         
     return processed_items
@@ -762,7 +771,7 @@ initialize_background_scheduler()
 st.set_page_config(page_title="Threads Shopee Auto-Poster Hub", layout="wide", page_icon="🚀")
 
 st.title("🚀 Threads Multi-Account & AI Studio")
-st.markdown("Otomasi Shopee Affiliate: Batch Single Produk, Targeted Niche, Multi-Link Listicle, dan Penjadwalan Terdistribusi.")
+st.markdown("Otomasi Shopee Affiliate & Engagement Booster: Single Produk, Multi-Link Listicle, Postingan Viral Organik, dan Penjadwalan Terdistribusi.")
 
 active_accounts = load_accounts()
 account_names_list = [a["name"] for a in active_accounts]
