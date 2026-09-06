@@ -1,0 +1,31 @@
+name: Threads Content Auto Generator
+
+on:
+  schedule:
+    # 18:30 UTC = 01:30 WIB (Tengah Malam)
+    - cron: '30 18 * * *'
+  workflow_dispatch: # Tombol manual trigger
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests gspread google-auth pytz
+
+      - name: Run Threads Content Generator
+        env:
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GCP_CREDS_BASE64: ${{ secrets.GCP_CREDS_BASE64 }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: python auto_generator.py
