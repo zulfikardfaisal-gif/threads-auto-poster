@@ -135,7 +135,7 @@ def arrange_post_types(num_viral, num_affiliate):
         curr += 1
     return ["viral" if i in viral_indices else "affiliate" for i in range(total)]
 
-# Helper update tab Config tanpa merusak format
+# Helper update tab Config
 def update_config_keys(sh_obj, kv_pairs: dict):
     cfg_ws = sh_obj.worksheet("Config")
     all_vals = cfg_ws.get_all_values()
@@ -149,19 +149,52 @@ def update_config_keys(sh_obj, kv_pairs: dict):
         else:
             cfg_ws.append_row([k, str(v)])
 
-# Helper Gemini
+# --- DYNAMIC MODEL DISCOVERY GEMINI AI ---
+@st.cache_data(ttl=3600)
+def get_best_gemini_model():
+    if not AI_API_KEY:
+        return "gemini-1.5-flash-latest"
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={AI_API_KEY}"
+        res = requests.get(url, timeout=10).json()
+        if "models" in res:
+            supported = [
+                m["name"].replace("models/", "")
+                for m in res["models"]
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+            for target in ["gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]:
+                for s in supported:
+                    if target in s:
+                        return s
+            if supported:
+                return supported[0]
+    except Exception:
+        pass
+    return "gemini-1.5-flash-latest"
+
 def call_gemini(prompt: str) -> str:
     if not AI_API_KEY:
         raise Exception("API Key Gemini (AI_API_KEY) belum disetel!")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={AI_API_KEY}"
-    res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30).json()
-    if "candidates" in res and res["candidates"]:
-        return res["candidates"][0]["content"]["parts"][0]["text"].strip()
-    url2 = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={AI_API_KEY}"
-    res2 = requests.post(url2, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30).json()
-    if "candidates" in res2 and res2["candidates"]:
-        return res2["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raise Exception(f"Gemini response error: {res}")
+
+    active_model = get_best_gemini_model()
+    candidate_models = [active_model, "gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]
+    seen = set()
+    unique_candidates = [x for x in candidate_models if not (x in seen or seen.add(x))]
+
+    last_err = None
+    for model_name in unique_candidates:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={AI_API_KEY}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        try:
+            res = requests.post(url, json=payload, timeout=30).json()
+            if "candidates" in res and res["candidates"]:
+                return res["candidates"][0]["content"]["parts"][0]["text"].strip()
+            last_err = res
+        except Exception as e:
+            last_err = e
+
+    raise Exception(f"Gemini response error: {last_err}")
 
 # Helper Tes Akun Threads
 def check_threads_token(user_id: str, access_token: str) -> dict:
@@ -388,7 +421,7 @@ with tabs[0]:
                                     else:
                                         prod = sampled_prods[aff_idx]
                                         aff_idx += 1
-                                        prompt_a = f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk: '{prod['product_name']}' ({prod.get('highlight', '')}). Maksimal 220 karakter. Tanpa hashtag dan tanda kutip."
+                                        prompt_a = f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk: '{prod['product_name']}' ({prod.get('highlight', '')}). Maks 220 karakter. Tanpa hashtag dan tanda kutip."
                                         main_txt = call_gemini(prompt_a)
                                         reply_txt = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
                                         new_rows.append([today_str, slot_time, acc_target, main_txt, "", reply_txt, prod["affiliate_link"], "PENDING", "", "", ""])
@@ -834,7 +867,6 @@ with tabs[2]:
                 if sh_obj:
                     with st.spinner("Menyimpan ke antrean Google Sheets..."):
                         try:
-                            # Tentukan daftar target akun
                             if target_account == "-- Semua Akun (All Accounts) --":
                                 accounts_to_save = acc_names_all
                             else:
@@ -935,8 +967,10 @@ with tabs[4]:
                     t_start = time_lib.time()
                     ai_reply = call_gemini("Halo! Balas hanya dengan kalimat persis: 'Koneksi Gemini AI Aktif & Berhasil!'")
                     elapsed = round(time_lib.time() - t_start, 2)
+                    used_model = get_best_gemini_model()
                     st.success(
                         f"✅ **Gemini AI Terhubung Sempurna!**\n\n"
+                        f"- **Model Aktif:** `{used_model}`\n"
                         f"- **Respon:** *'{ai_reply}'*\n"
                         f"- **Latensi:** `{elapsed} detik`\n"
                         f"- **Status:** Siap Menulis Copywriting Otomatis"
