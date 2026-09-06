@@ -31,7 +31,7 @@ SPREADSHEET_ID = get_secret("SPREADSHEET_ID")
 GCP_CREDS_BASE64 = get_secret("GCP_CREDS_BASE64")
 AI_API_KEY = get_secret("AI_API_KEY")
 
-# --- KONEKSI GOOGLE SHEETS DENGAN CLIENT CACHE ---
+# --- KONEKSI GOOGLE SHEETS ---
 @st.cache_resource
 def get_gspread_client():
     if not GCP_CREDS_BASE64:
@@ -53,7 +53,7 @@ def get_spreadsheet():
         return None
     return client.open_by_key(SPREADSHEET_ID)
 
-# --- CACHE DATA READING UNTUK MENCEGAH ERROR 429 ---
+# --- CACHE DATA READING ---
 @st.cache_data(ttl=60)
 def load_all_sheets_data():
     client = get_gspread_client()
@@ -97,7 +97,7 @@ def parse_dt(s: str) -> datetime:
     y, mo, d, h, mi = map(int, m.groups())
     return TZ.localize(datetime(y, mo, d, h, mi))
 
-# Helper distribusi slot jam tayang otomatis
+# Helper distribusi slot jam tayang
 def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
     if total_count <= 0:
         return []
@@ -114,7 +114,7 @@ def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
         slots.append(f"{curr_m // 60:02d}:{curr_m % 60:02d}")
     return slots
 
-# Helper penyusunan urutan konten (Viral vs Affiliate)
+# Helper penyusunan urutan konten
 def arrange_post_types(num_viral, num_affiliate):
     total = num_viral + num_affiliate
     if total == 0:
@@ -135,7 +135,19 @@ def arrange_post_types(num_viral, num_affiliate):
         curr += 1
     return ["viral" if i in viral_indices else "affiliate" for i in range(total)]
 
-# Helper instruksi panjang-pendek teks AI
+# Helper acak panjang-pendek dengan bias
+def pick_length_by_bias(bias: str) -> str:
+    lengths = ["Pendek", "Sedang", "Panjang"]
+    if "Dominan Pendek" in bias:
+        weights = [0.60, 0.25, 0.15]
+    elif "Dominan Panjang" in bias:
+        weights = [0.15, 0.25, 0.60]
+    elif "Dominan Sedang" in bias:
+        weights = [0.20, 0.60, 0.20]
+    else:
+        weights = [0.33, 0.34, 0.33]
+    return random.choices(lengths, weights=weights, k=1)[0]
+
 def get_length_prompt_desc(length_opt: str) -> str:
     if "Pendek" in length_opt:
         return "Tulis sangat ringkas, padat, dan to-the-point (maksimal 100-120 karakter, 1-2 kalimat saja)."
@@ -158,7 +170,7 @@ def update_config_keys(sh_obj, kv_pairs: dict):
         else:
             cfg_ws.append_row([k, str(v)])
 
-# --- CALL GEMINI DENGAN DYNAMIC DISCOVERY (v1 & v1beta) ---
+# --- CALL GEMINI DENGAN DYNAMIC DISCOVERY ---
 def call_gemini_core(prompt: str) -> tuple:
     key = AI_API_KEY.strip() if AI_API_KEY else ""
     if not key:
@@ -167,7 +179,6 @@ def call_gemini_core(prompt: str) -> tuple:
     available_pairs = []
     errors = []
 
-    # 1. Cek ModelService.ListModels di versi v1 dan v1beta
     for ver in ["v1", "v1beta"]:
         list_url = f"https://generativelanguage.googleapis.com/{ver}/models?key={key}"
         try:
@@ -193,7 +204,6 @@ def call_gemini_core(prompt: str) -> tuple:
 
     available_pairs.sort(key=get_rank)
 
-    # 2. Eksekusi model hasil discovery
     if available_pairs:
         for ver, m_name in available_pairs:
             gen_url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
@@ -206,7 +216,6 @@ def call_gemini_core(prompt: str) -> tuple:
             except Exception:
                 continue
 
-    # 3. Fallback direct endpoint
     fallback_models = [
         ("v1", "gemini-1.5-flash"),
         ("v1", "gemini-1.5-pro"),
@@ -234,6 +243,33 @@ def call_gemini(prompt: str) -> str:
     text, _ = call_gemini_core(prompt)
     return text
 
+# Helper Generator Rantai Balasan (Link selalu di reply terakhir)
+def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, reply_count: int) -> list:
+    if reply_count <= 0 or not aff_link:
+        return []
+    if reply_count == 1:
+        return [f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{aff_link}"]
+
+    intermediate_count = reply_count - 1
+    prompt = (
+        f"Untuk postingan Threads tentang produk '{prod_name}' (Keunggulan: '{prod_hl}'). "
+        f"Tulis persis {intermediate_count} tweet balasan pendek lanjutan yang menyambung (sebelum link affiliate). "
+        f"Gaya santai, relate, jujur, mengalir. Pisahkan setiap balasan dengan tanda '---'. "
+        f"Maksimal 120 karakter per balasan. DILARANG pakai hashtag dan JANGAN sertakan link affiliate di sini."
+    )
+    try:
+        raw_res = call_gemini(prompt)
+        parts = [p.strip() for p in raw_res.split("---") if p.strip()]
+        replies = parts[:intermediate_count]
+        while len(replies) < intermediate_count:
+            replies.append("Worth it banget sih ini buat pemakaian jangka panjang.")
+    except Exception:
+        replies = ["Jujur ini kepake banget buat kebutuhan sehari-hari." for _ in range(intermediate_count)]
+
+    # Balasan terakhir WAJIB berisi Link Affiliate
+    replies.append(f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{aff_link}")
+    return replies
+
 # Helper Tes Akun Threads
 def check_threads_token(user_id: str, access_token: str) -> dict:
     url = f"https://graph.threads.net/v1.0/me?fields=id,username,threads_profile_picture_url&access_token={access_token}"
@@ -247,7 +283,7 @@ def check_threads_token(user_id: str, access_token: str) -> dict:
 c_head1, c_head2 = st.columns([4, 1])
 with c_head1:
     st.title("🧵 Threads Affiliate & Autopilot Dashboard")
-    st.caption("Pusat kendali konten manual & autopilot (Pilihan Reply, Panjang-Pendek, Katalog 50+ Produk & Multi-Akun).")
+    st.caption("Pusat kendali konten manual & autopilot (Rantai Reply, Acak Panjang-Pendek Berbobot, Multi-Akun).")
 with c_head2:
     if st.button("🔄 Segarkan Data Sheets"):
         st.cache_data.clear()
@@ -273,11 +309,11 @@ tabs = st.tabs([
 ])
 
 # ==============================================================================
-# TAB 1: KONTROL AUTOPILOT (JADWAL, PANJANG KONTEN & OPSI REPLY)
+# TAB 1: KONTROL AUTOPILOT (JADWAL, PANJANG RANDOM & JUMLAH REPLY)
 # ==============================================================================
 with tabs[0]:
     st.subheader("Pengaturan Jadwal & Format Autopilot")
-    st.write("Atur tanggal aktif, porsi jumlah konten harian, **pilihan reply link**, serta **panjang-pendek tulisan AI**.")
+    st.write("Atur tanggal aktif, porsi harian, **jumlah balasan rantai (link di akhir)**, dan **bobot acak panjang-pendek thread**.")
 
     raw_start = cfg_data.get("start_datetime", "2026-09-06 08:00")
     raw_end = cfg_data.get("end_datetime", "2026-09-30 22:00")
@@ -293,8 +329,13 @@ with tabs[0]:
         cur_affiliate_count = 4
 
     cur_target_acc = cfg_data.get("target_autopilot_account", "-- Semua Akun (All Accounts) --")
-    cur_include_reply = cfg_data.get("include_reply", "YA").upper()
-    cur_content_length = cfg_data.get("content_length", "Sedang")
+    
+    try:
+        cur_reply_count = int(cfg_data.get("reply_count", 1))
+    except:
+        cur_reply_count = 1
+
+    cur_length_bias = cfg_data.get("length_bias", "Dominan Sedang (Lebih banyak standar)")
 
     now = datetime.now(TZ)
     try:
@@ -312,13 +353,13 @@ with tabs[0]:
             st.warning(f"🔴 **STATUS: AUTOPILOT NON-AKTIF / DI LUAR JADWAL**\n\nWaktu sekarang: `{now.strftime('%Y-%m-%d %H:%M:%S')} WIB`")
     with col_stat2:
         total_daily = cur_viral_count + cur_affiliate_count
-        reply_info = "Aktif (Disertai link reply)" if cur_include_reply == "YA" else "Nonaktif (Tanpa link reply)"
         st.info(
             f"**Konfigurasi Tersimpan Saat Ini:**\n"
             f"- Jadwal: `{raw_start} WIB` s/d `{raw_end} WIB`\n"
             f"- Kuota Harian: **{total_daily} Konten** ({cur_viral_count} Viral + {cur_affiliate_count} Affiliate)\n"
             f"- Target Akun: `{cur_target_acc}`\n"
-            f"- Balasan Link (Reply): **{reply_info}** | Panjang Teks: **{cur_content_length}**"
+            f"- Rantai Reply: **{cur_reply_count} Balasan** (Link Aff di reply #{cur_reply_count})\n"
+            f"- Pola Panjang AI: **{cur_length_bias}**"
         )
 
     st.divider()
@@ -363,7 +404,7 @@ with tabs[0]:
         end_t = st.time_input("Jam Berakhir (End Time)", value=def_end_time)
 
     # Form Porsi Konten & Format Baru
-    st.write("##### 🎯 Porsi Konten & Format Teks Autopilot")
+    st.write("##### 🎯 Porsi Konten, Format Rantai Reply & Pola Panjang Teks")
     col_q1, col_q2 = st.columns(2)
     with col_q1:
         sel_viral = st.number_input(
@@ -382,33 +423,36 @@ with tabs[0]:
             help="Postingan rekomendasi produk affiliate"
         )
 
-    # FITUR BARU AUTOPILOT: PANJANG-PENDEK & OPSI REPLY
+    # OPSI BARU AUTOPILOT: PANJANG RANDOM BERBOBOT & JUMLAH REPLY
     col_fmt1, col_fmt2 = st.columns(2)
     with col_fmt1:
-        len_options = [
-            "Sedang (Standar Threads, 180-250 karakter)",
-            "Pendek (Ringkas & Padat, max 100-120 karakter)",
-            "Panjang (Storytelling Mendalam, 300-450 karakter)"
+        bias_options = [
+            "Dominan Sedang (Lebih banyak standar)",
+            "Dominan Pendek (Lebih banyak ringkas)",
+            "Dominan Panjang (Lebih banyak storytelling)",
+            "Acak Seimbang (Rata: Pendek, Sedang, Panjang)"
         ]
-        def_len_idx = 0
-        if "Pendek" in cur_content_length:
-            def_len_idx = 1
-        elif "Panjang" in cur_content_length:
-            def_len_idx = 2
-        sel_len_autopilot = st.selectbox("📏 Panjang Teks AI (Autopilot)", len_options, index=def_len_idx)
+        def_bias_idx = bias_options.index(cur_length_bias) if cur_length_bias in bias_options else 0
+        sel_bias_autopilot = st.selectbox(
+            "🎲 Pola Panjang Teks (Random Berbobot)",
+            bias_options,
+            index=def_bias_idx,
+            help="AI akan mengacak panjang teks postingan dengan prioritas bobot yang Anda pilih."
+        )
     with col_fmt2:
-        reply_options = [
-            "Ya (Sertakan Balasan Link Affiliate di Komentar)",
-            "Tidak (Tanpa Link / Hanya Postingan Utama)"
-        ]
-        def_reply_idx = 0 if cur_include_reply == "YA" else 1
-        sel_reply_autopilot = st.selectbox("💬 Balasan / Reply Link (Autopilot)", reply_options, index=def_reply_idx)
+        sel_reply_count_ap = st.number_input(
+            "💬 Jumlah Rantai Balasan per Thread Affiliate",
+            min_value=1,
+            max_value=5,
+            value=cur_reply_count,
+            help="Jumlah balasan otomatis di bawah postingan utama. Link affiliate akan selalu ditaruh di balasan terakhir!"
+        )
 
     total_plan = sel_viral + sel_affiliate
     preview_slots = generate_slots(total_plan)
     preview_types = arrange_post_types(sel_viral, sel_affiliate)
 
-    st.caption(f"💡 **Total Rencana:** {total_plan} postingan per hari.")
+    st.caption(f"💡 **Total Rencana:** {total_plan} postingan per hari. Link affiliate disematkan pada balasan ke-{sel_reply_count_ap}.")
     slot_badges = [f"`{preview_slots[i]} ({'Viral 🚀' if preview_types[i]=='viral' else 'Affiliate 🛍️'})`" for i in range(total_plan)]
     st.markdown("🕒 **Distribusi Jam Tayang:** " + " ➜ ".join(slot_badges))
 
@@ -418,8 +462,6 @@ with tabs[0]:
             try:
                 new_start_str = f"'{start_d.strftime('%Y-%m-%d')} {start_t.strftime('%H:%M')}"
                 new_end_str = f"'{end_d.strftime('%Y-%m-%d')} {end_t.strftime('%H:%M')}"
-                saved_len_val = "Pendek" if "Pendek" in sel_len_autopilot else ("Panjang" if "Panjang" in sel_len_autopilot else "Sedang")
-                saved_reply_val = "YA" if "Ya" in sel_reply_autopilot else "TIDAK"
                 
                 update_config_keys(sh_obj, {
                     "start_datetime": new_start_str,
@@ -427,11 +469,11 @@ with tabs[0]:
                     "daily_viral_count": str(sel_viral),
                     "daily_affiliate_count": str(sel_affiliate),
                     "target_autopilot_account": str(sel_auto_acc),
-                    "include_reply": saved_reply_val,
-                    "content_length": saved_len_val
+                    "reply_count": str(sel_reply_count_ap),
+                    "length_bias": str(sel_bias_autopilot)
                 })
                 st.cache_data.clear()
-                st.success("✅ Pengaturan autopilot (termasuk Reply & Panjang-Pendek) berhasil disimpan!")
+                st.success("✅ Pengaturan autopilot (Reply Chain & Pola Panjang Teks) berhasil disimpan!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Gagal menyimpan ke Google Sheets: {e}")
@@ -440,7 +482,7 @@ with tabs[0]:
 
     # Tombol Eksekusi Cepat
     st.write("#### ⚡ Eksekusi Cepat: Generate Konten Hari Ini")
-    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) format {sel_len_autopilot[:6]} untuk {sel_auto_acc}.")
+    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) dengan {sel_reply_count_ap} rantai balasan untuk {sel_auto_acc}.")
 
     if st.button("🚀 Generate Konten Autopilot Sekarang"):
         sh_obj = get_spreadsheet()
@@ -473,9 +515,6 @@ with tabs[0]:
                             data_ws = sh_obj.worksheet("data")
                             new_rows = []
 
-                            len_desc = get_length_prompt_desc(sel_len_autopilot)
-                            include_rep_bool = ("Ya" in sel_reply_autopilot)
-
                             for acc_target in target_accounts_to_run:
                                 if len(ready_prods) >= sel_affiliate:
                                     sampled_prods = random.sample(ready_prods, sel_affiliate)
@@ -484,10 +523,14 @@ with tabs[0]:
 
                                 aff_idx = 0
                                 for slot_time, p_type in zip(preview_slots, preview_types):
+                                    # Acak panjang postingan per konten sesuai bobot
+                                    chosen_len = pick_length_by_bias(sel_bias_autopilot)
+                                    len_desc = get_length_prompt_desc(chosen_len)
+
                                     if p_type == "viral":
                                         topic = random.choice(viral_prompts)
                                         prompt_v = (
-                                            f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar warganet tentang: '{topic}'. "
+                                            f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: '{topic}'. "
                                             f"{len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
                                         )
                                         v_text = call_gemini(prompt_v)
@@ -497,14 +540,20 @@ with tabs[0]:
                                         aff_idx += 1
                                         prompt_a = (
                                             f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk barang: '{prod['product_name']}' "
-                                            f"(Keunggulan: {prod.get('highlight', '')}). {len_desc} DILARANG pakai hashtag atau tanda kutip."
+                                            f"(Keunggulan: {prod.get('highlight', '')}). {len_desc} Tanpa hashtag dan tanda kutip."
                                         )
                                         main_txt = call_gemini(prompt_a)
-                                        if include_rep_bool:
-                                            reply_txt = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
-                                        else:
-                                            reply_txt = ""
-                                        new_rows.append([today_str, slot_time, acc_target, main_txt, "", reply_txt, prod["affiliate_link"], "PENDING", "", "", ""])
+                                        
+                                        # Buat balasan bertingkat dengan link di akhir
+                                        replies_chain = generate_affiliate_replies(
+                                            prod['product_name'],
+                                            prod.get('highlight', ''),
+                                            prod['affiliate_link'],
+                                            sel_reply_count_ap
+                                        )
+                                        joined_replies = "\n---REPLY---\n".join(replies_chain)
+
+                                        new_rows.append([today_str, slot_time, acc_target, main_txt, "", joined_replies, prod["affiliate_link"], "PENDING", "", "", ""])
 
                             for r in new_rows:
                                 data_ws.append_row(r)
@@ -650,7 +699,7 @@ with tabs[1]:
 # ==============================================================================
 with tabs[2]:
     st.subheader("✍️ Content Studio (Pembuat Konten Manual & AI)")
-    st.caption("Atur target akun, waktu mulai, jumlah postingan, selang waktu (2 Jam s/d 1 Hari), panjang teks AI, dan opsi balasan affiliate.")
+    st.caption("Atur target akun, waktu mulai, jumlah postingan, selang waktu (2 Jam s/d 1 Hari), panjang teks AI, dan jumlah rantai balasan.")
 
     acc_names_all = [str(a["name"]).strip() for a in acc_records if str(a.get("name", "")).strip()]
     account_choices = ["-- Semua Akun (All Accounts) --"] + acc_names_all if acc_names_all else ["Belum ada akun"]
@@ -659,7 +708,7 @@ with tabs[2]:
     if "manual_generated_posts" not in st.session_state:
         st.session_state["manual_generated_posts"] = []
 
-    # 1. PENGATURAN UTAMA: TARGET, WAKTU MULAI, INTERVAL, PANJANG TEKS & REPLY OPTION
+    # 1. PENGATURAN UTAMA: TARGET, WAKTU MULAI, INTERVAL, PANJANG TEKS & JUMLAH REPLY
     st.write("#### ⚙️ 1. Pengaturan Jadwal, Frekuensi & Format Teks")
     c_set1, c_set2, c_set3, c_set4 = st.columns(4)
     with c_set1:
@@ -676,25 +725,26 @@ with tabs[2]:
             format_func=lambda x: f"{x // 60} Jam Sekali" if x < 1440 else "1 Hari Sekali (24 Jam)"
         )
 
-    # FITUR BARU CONTENT STUDIO: PILIHAN PANJANG TEKS & TOGGLE REPLY
+    # PILIHAN PANJANG TEKS & JUMLAH BALASAN (REPLY CHAIN)
     c_fmt1, c_fmt2 = st.columns([2, 2])
     with c_fmt1:
         manual_length_opt = st.selectbox(
-            "📏 Panjang Teks AI",
+            "📏 Panjang Teks Postingan Utama",
             [
                 "Sedang (Standar Threads, 180-250 karakter)",
                 "Pendek (Ringkas & Padat, 1-2 kalimat, max 120 karakter)",
-                "Panjang (Storytelling Mendalam, 300-450 karakter)"
+                "Panjang (Storytelling Mendalam, 300-450 karakter)",
+                "🎲 Acak / Random Sesuai Mood AI"
             ],
             index=0
         )
     with c_fmt2:
-        st.write(" ")
-        st.write(" ")
-        manual_include_reply = st.checkbox(
-            "💬 Sertakan Balasan / Reply Link Affiliate di Komentar",
-            value=True,
-            help="Jika dicentang, komentar otomatis berisi link pembelian. Jika tidak, hanya postingan utama yang dibuat."
+        manual_reply_count = st.number_input(
+            "💬 Jumlah Rantai Balasan (Reply Chain)",
+            min_value=1,
+            max_value=5,
+            value=1,
+            help="Jumlah balasan otomatis di bawah postingan utama. Link affiliate akan selalu ditaruh di balasan terakhir!"
         )
 
     st.divider()
@@ -729,8 +779,6 @@ with tabs[2]:
         "Racun Belanja Shopee (Antusias & bikin pengen checkout)",
         "Serahkan ke AI (Smart Adaptive Copywriting)"
     ]
-
-    length_desc_manual = get_length_prompt_desc(manual_length_opt)
 
     # --- MODE A: KURASI PRODUK (LISTICLE HINGGA 5 PRODUK) ---
     if content_mode == "📑 Kurasi Produk (Listicle hingga 5 Produk)":
@@ -780,19 +828,20 @@ with tabs[2]:
                         for post_idx in range(num_posts):
                             p_dt = base_dt + timedelta(minutes=post_idx * interval_mins)
                             
+                            act_len = random.choice(["Pendek", "Sedang", "Panjang"]) if "Acak" in manual_length_opt else manual_length_opt
+                            len_desc = get_length_prompt_desc(act_len)
+
                             prompt_hook = (
                                 f"Tulis 1 postingan pembuka (hook) Threads bahasa Indonesia yang bikin penasaran tentang: '{listicle_title}'. "
-                                f"Gaya penulisan: {ls_style}. {length_desc_manual} DILARANG pakai hashtag, tanpa tanda kutip."
+                                f"Gaya penulisan: {ls_style}. {len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
                             )
                             hook_text = call_gemini(prompt_hook)
 
-                            if manual_include_reply:
-                                reply_lines = []
-                                for idx_num, it in enumerate(valid_items, start=1):
-                                    reply_lines.append(f"{idx_num}. {it['name']} ✨\n{it['link']}")
-                                reply_full = "\n\n".join(reply_lines)
-                            else:
-                                reply_full = ""
+                            # Balasan terstruktur (daftar lengkap di reply terakhir)
+                            reply_lines = []
+                            for idx_num, it in enumerate(valid_items, start=1):
+                                reply_lines.append(f"{idx_num}. {it['name']} ✨\n{it['link']}")
+                            reply_full = "\n\n".join(reply_lines)
 
                             gen_list.append({
                                 "date": p_dt.strftime("%Y-%m-%d"),
@@ -848,28 +897,30 @@ with tabs[2]:
                             p_hl = sp_hl_input
                             p_link = sp_link_input
 
+                        act_len = random.choice(["Pendek", "Sedang", "Panjang"]) if "Acak" in manual_length_opt else manual_length_opt
+                        len_desc = get_length_prompt_desc(act_len)
+
                         prompt = (
                             f"Tulis 1 postingan Threads bahasa Indonesia yang santai, tidak hard-selling, dan relate untuk produk: '{p_name}' "
-                            f"(Keunggulan: '{p_hl}'). Gaya bahasa: {sp_style}. {length_desc_manual} Tanpa hashtag dan tanda kutip."
+                            f"(Keunggulan: '{p_hl}'). Gaya bahasa: {sp_style}. {len_desc} Tanpa hashtag dan tanda kutip."
                         )
                         main_t = call_gemini(prompt)
 
-                        if manual_include_reply and p_link:
-                            reply_t = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{p_link}"
-                        else:
-                            reply_t = ""
+                        # Generate rantai balasan dengan link di balasan terakhir
+                        replies_chain = generate_affiliate_replies(p_name, p_hl, p_link, manual_reply_count)
+                        joined_replies = "\n---REPLY---\n".join(replies_chain)
 
                         gen_list.append({
                             "date": p_dt.strftime("%Y-%m-%d"),
                             "time": p_dt.strftime("%H:%M"),
                             "account": target_account,
                             "main": main_t,
-                            "reply": reply_t,
+                            "reply": joined_replies,
                             "link": p_link
                         })
 
                     st.session_state["manual_generated_posts"] = gen_list
-                    st.success(f"🎉 Berhasil membuat {len(gen_list)} draf!")
+                    st.success(f"🎉 Berhasil membuat {len(gen_list)} draf dengan rantai {manual_reply_count} balasan!")
                 except Exception as e:
                     st.error(f"Gagal generate: {e}")
 
@@ -901,9 +952,13 @@ with tabs[2]:
                     for post_idx in range(num_posts):
                         p_dt = base_dt + timedelta(minutes=post_idx * interval_mins)
                         curr_topic = vb_topic if vb_topic else random.choice(topics_pool)
+                        
+                        act_len = random.choice(["Pendek", "Sedang", "Panjang"]) if "Acak" in manual_length_opt else manual_length_opt
+                        len_desc = get_length_prompt_desc(act_len)
+
                         prompt = (
                             f"Tulis 1 postingan Threads bahasa Indonesia yang sangat relatable dan memicu interaksi/komentar warganet tentang: '{curr_topic}'. "
-                            f"Angle: {vb_style}. {length_desc_manual} DILARANG pakai hashtag, tanpa tanda kutip."
+                            f"Angle: {vb_style}. {len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
                         )
                         v_text = call_gemini(prompt)
                         gen_list.append({
@@ -927,7 +982,11 @@ with tabs[2]:
         with c_man1:
             man_main = st.text_area("Teks Postingan Utama", placeholder="Ketik teks utama di sini...", height=120)
         with c_man2:
-            man_reply = st.text_area("Teks Balasan / Link (Opsional)", placeholder="Ketik teks balasan atau link...", height=120)
+            man_reply = st.text_area(
+                "Teks Balasan (Gunakan '---REPLY---' untuk memisahkan balasan bertingkat)",
+                placeholder="Balasan 1...\n---REPLY---\nBalasan 2 (Link Shopee)...",
+                height=120
+            )
             man_link = st.text_input("Link Affiliate Cadangan", placeholder="https://...")
 
         if st.button("➕ Tambahkan ke Daftar Antrean di Bawah"):
@@ -942,16 +1001,16 @@ with tabs[2]:
                     "time": p_dt.strftime("%H:%M"),
                     "account": target_account,
                     "main": man_main.strip(),
-                    "reply": man_reply.strip() if manual_include_reply else "",
+                    "reply": man_reply.strip(),
                     "link": man_link.strip()
                 })
                 st.success("✅ Konten manual ditambahkan ke daftar preview di bawah!")
 
     st.divider()
 
-    # --- 3. PREVIEW & SIMPAN KE GOOGLE SHEETS TAB 'DATA' (DUKUNGAN ALL ACCOUNTS) ---
+    # --- 3. PREVIEW & SIMPAN KE GOOGLE SHEETS TAB 'DATA' ---
     st.write("#### 📝 3. Preview Draf Antrean & Finalisasi")
-    st.caption("Periksa dan sunting teks sebelum menyimpan ke Google Sheets. Jika memilih 'All Accounts', setiap akun akan menerima postingan ini.")
+    st.caption("Periksa dan sunting teks sebelum menyimpan ke Google Sheets. Balasan bertingkat dipisahkan oleh tanda '---REPLY---'.")
 
     posts_to_show = st.session_state.get("manual_generated_posts", [])
 
@@ -967,7 +1026,7 @@ with tabs[2]:
                 with col_box1:
                     p_item["main"] = st.text_area(f"Teks Utama #{idx_p + 1}", value=p_item["main"], height=90, key=f"preview_main_{idx_p}")
                 with col_box2:
-                    p_item["reply"] = st.text_area(f"Balasan / Link #{idx_p + 1}", value=p_item["reply"], height=90, key=f"preview_reply_{idx_p}")
+                    p_item["reply"] = st.text_area(f"Balasan / Rantai Balasan #{idx_p + 1}", value=p_item["reply"], height=90, key=f"preview_reply_{idx_p}")
                     p_item["link"] = st.text_input(f"Link #{idx_p + 1}", value=p_item["link"], key=f"preview_link_{idx_p}")
 
         col_b1, col_b2 = st.columns([2, 1])
@@ -1021,7 +1080,7 @@ with tabs[3]:
         st.info("Belum ada antrean di tab data.")
 
 # ==============================================================================
-# TAB 5: AKUN THREADS & DIAGNOSTIK SISTEM (TAMBAH AKUN & TES KONEKSI)
+# TAB 5: AKUN THREADS & DIAGNOSTIK SISTEM
 # ==============================================================================
 with tabs[4]:
     st.subheader("⚙️ Manajemen Akun Threads & Diagnostik Sistem")
@@ -1041,7 +1100,7 @@ with tabs[4]:
 
     st.divider()
 
-    # 2. FITUR DIAGNOSTIK & TES KONEKSI (TES AKUN & TES AI)
+    # 2. FITUR DIAGNOSTIK & TES KONEKSI
     st.write("#### 🩺 Diagnostik & Tes Koneksi")
     c_diag1, c_diag2 = st.columns(2)
 
