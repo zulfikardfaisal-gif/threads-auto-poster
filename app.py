@@ -107,15 +107,11 @@ def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
     h2, m2 = map(int, end_time_str.split(":"))
     start_minutes = h1 * 60 + m1
     end_minutes = h2 * 60 + m2
-    total_span = end_minutes - start_minutes
-    step = total_span / (total_count - 1)
+    step = (end_minutes - start_minutes) / (total_count - 1)
     slots = []
     for i in range(total_count):
-        curr_m = int(round(start_minutes + i * step))
-        curr_m = 5 * round(curr_m / 5)
-        h = curr_m // 60
-        m = curr_m % 60
-        slots.append(f"{h:02d}:{m:02d}")
+        curr_m = 5 * round(int(round(start_minutes + i * step)) / 5)
+        slots.append(f"{curr_m // 60:02d}:{curr_m % 60:02d}")
     return slots
 
 # Helper penyusunan urutan konten (Viral vs Affiliate)
@@ -132,8 +128,7 @@ def arrange_post_types(num_viral, num_affiliate):
     step = total / num_viral
     viral_indices = set()
     for i in range(num_viral):
-        idx = int(round(i * step))
-        viral_indices.add(min(idx, total - 1))
+        viral_indices.add(min(int(round(i * step)), total - 1))
     curr = 0
     while len(viral_indices) < num_viral and curr < total:
         viral_indices.add(curr)
@@ -168,11 +163,20 @@ def call_gemini(prompt: str) -> str:
         return res2["candidates"][0]["content"]["parts"][0]["text"].strip()
     raise Exception(f"Gemini response error: {res}")
 
+# Helper Tes Akun Threads
+def check_threads_token(user_id: str, access_token: str) -> dict:
+    url = f"https://graph.threads.net/v1.0/me?fields=id,username,threads_profile_picture_url&access_token={access_token}"
+    try:
+        r = requests.get(url, timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"error": {"message": str(e)}}
+
 # Tampilan Header
 c_head1, c_head2 = st.columns([4, 1])
 with c_head1:
     st.title("🧵 Threads Affiliate & Autopilot Dashboard")
-    st.caption("Pusat kendali konten manual, pengaturan autopilot dinamis (Viral & Affiliate), dan katalog produk.")
+    st.caption("Pusat kendali konten manual, autopilot harian, katalog produk, dan manajemen multi-akun.")
 with c_head2:
     if st.button("🔄 Segarkan Data Sheets"):
         st.cache_data.clear()
@@ -188,12 +192,13 @@ except Exception as e:
         st.error(f"Gagal memuat data Google Sheets: {e}")
     st.stop()
 
+# Tab Menu
 tabs = st.tabs([
     "⚡ Kontrol Autopilot",
     "📦 Katalog Produk (50+ Items)",
     "✍️ Content Studio (Manual & AI)",
     "📋 Antrean & Riwayat",
-    "⚙️ Akun Threads"
+    "⚙️ Akun Threads & Diagnostik"
 ])
 
 # ==============================================================================
@@ -216,6 +221,8 @@ with tabs[0]:
     except:
         cur_affiliate_count = 4
 
+    cur_target_acc = cfg_data.get("target_autopilot_account", "-- Semua Akun (All Accounts) --")
+
     now = datetime.now(TZ)
     try:
         cur_start = parse_dt(raw_start)
@@ -235,13 +242,22 @@ with tabs[0]:
         st.info(
             f"**Konfigurasi Tersimpan Saat Ini:**\n"
             f"- Jadwal: `{raw_start} WIB` s/d `{raw_end} WIB`\n"
-            f"- Kuota Harian: **{total_daily} Konten** ({cur_viral_count} Viral + {cur_affiliate_count} Affiliate)"
+            f"- Kuota Harian: **{total_daily} Konten** ({cur_viral_count} Viral + {cur_affiliate_count} Affiliate)\n"
+            f"- Target Akun: `{cur_target_acc}`"
         )
 
     st.divider()
 
-    st.write("#### 🛠️ Sesuaikan Jadwal & Jumlah Konten per Hari")
+    st.write("#### 🛠️ Sesuaikan Jadwal, Target Akun & Jumlah Konten")
     
+    acc_names_all = [str(a["name"]).strip() for a in acc_records if str(a.get("name", "")).strip()]
+    auto_acc_options = ["-- Semua Akun (All Accounts) --"] + acc_names_all
+
+    col_ap_acc, col_ap_blank = st.columns([2, 2])
+    with col_ap_acc:
+        def_acc_idx = auto_acc_options.index(cur_target_acc) if cur_target_acc in auto_acc_options else 0
+        sel_auto_acc = st.selectbox("🎯 Target Akun Autopilot", auto_acc_options, index=def_acc_idx)
+
     # Form Tanggal
     col_d1, col_t1 = st.columns(2)
     with col_d1:
@@ -271,7 +287,7 @@ with tabs[0]:
             def_end_time = time(22, 0)
         end_t = st.time_input("Jam Berakhir (End Time)", value=def_end_time)
 
-    # Form Pemilihan Jumlah Konten per Hari
+    # Form Porsi Konten
     st.write("##### 🎯 Porsi Konten Harian Autopilot")
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -310,7 +326,8 @@ with tabs[0]:
                     "start_datetime": new_start_str,
                     "end_datetime": new_end_str,
                     "daily_viral_count": str(sel_viral),
-                    "daily_affiliate_count": str(sel_affiliate)
+                    "daily_affiliate_count": str(sel_affiliate),
+                    "target_autopilot_account": str(sel_auto_acc)
                 })
                 st.cache_data.clear()
                 st.success("✅ Pengaturan autopilot berhasil diperbarui dan disimpan!")
@@ -322,7 +339,7 @@ with tabs[0]:
 
     # Tombol Eksekusi Cepat
     st.write("#### ⚡ Eksekusi Cepat: Generate Konten Hari Ini")
-    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) langsung ke antrean `data`.")
+    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) untuk {sel_auto_acc}.")
 
     if st.button("🚀 Generate Konten Autopilot Sekarang"):
         sh_obj = get_spreadsheet()
@@ -332,9 +349,13 @@ with tabs[0]:
             with st.spinner(f"Sedang meracik {total_plan} konten via Gemini AI..."):
                 try:
                     if not acc_records:
-                        st.error("Tab Accounts masih kosong. Daftarkan akun terlebih dahulu.")
+                        st.error("Tab Accounts masih kosong. Daftarkan akun terlebih dahulu di tab '⚙️ Akun Threads & Diagnostik'.")
                     else:
-                        target_acc = acc_records[0]["name"]
+                        if sel_auto_acc == "-- Semua Akun (All Accounts) --":
+                            target_accounts_to_run = acc_names_all
+                        else:
+                            target_accounts_to_run = [sel_auto_acc]
+
                         ready_prods = [p for p in raw_prods if str(p.get("status", "")).strip().upper() == "READY"]
 
                         if sel_affiliate > 0 and not ready_prods:
@@ -351,32 +372,32 @@ with tabs[0]:
                             data_ws = sh_obj.worksheet("data")
                             new_rows = []
 
-                            # Sample produk
-                            if len(ready_prods) >= sel_affiliate:
-                                sampled_prods = random.sample(ready_prods, sel_affiliate)
-                            else:
-                                sampled_prods = random.choices(ready_prods, k=sel_affiliate)
-
-                            aff_idx = 0
-                            for slot_time, p_type in zip(preview_slots, preview_types):
-                                if p_type == "viral":
-                                    topic = random.choice(viral_prompts)
-                                    prompt_v = f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: {topic}. Maksimal 250 karakter. Tanpa hashtag dan tanda kutip."
-                                    v_text = call_gemini(prompt_v)
-                                    new_rows.append([today_str, slot_time, target_acc, v_text, "", "", "", "PENDING", "", "", ""])
+                            for acc_target in target_accounts_to_run:
+                                if len(ready_prods) >= sel_affiliate:
+                                    sampled_prods = random.sample(ready_prods, sel_affiliate)
                                 else:
-                                    prod = sampled_prods[aff_idx]
-                                    aff_idx += 1
-                                    prompt_a = f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk: '{prod['product_name']}' ({prod.get('highlight', '')}). Maks 220 karakter. Tanpa hashtag dan tanda kutip."
-                                    main_txt = call_gemini(prompt_a)
-                                    reply_txt = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
-                                    new_rows.append([today_str, slot_time, target_acc, main_txt, "", reply_txt, prod["affiliate_link"], "PENDING", "", "", ""])
+                                    sampled_prods = random.choices(ready_prods, k=sel_affiliate)
+
+                                aff_idx = 0
+                                for slot_time, p_type in zip(preview_slots, preview_types):
+                                    if p_type == "viral":
+                                        topic = random.choice(viral_prompts)
+                                        prompt_v = f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: {topic}. Maksimal 250 karakter. Tanpa hashtag dan tanda kutip."
+                                        v_text = call_gemini(prompt_v)
+                                        new_rows.append([today_str, slot_time, acc_target, v_text, "", "", "", "PENDING", "", "", ""])
+                                    else:
+                                        prod = sampled_prods[aff_idx]
+                                        aff_idx += 1
+                                        prompt_a = f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk: '{prod['product_name']}' ({prod.get('highlight', '')}). Maksimal 220 karakter. Tanpa hashtag dan tanda kutip."
+                                        main_txt = call_gemini(prompt_a)
+                                        reply_txt = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
+                                        new_rows.append([today_str, slot_time, acc_target, main_txt, "", reply_txt, prod["affiliate_link"], "PENDING", "", "", ""])
 
                             for r in new_rows:
                                 data_ws.append_row(r)
 
                             st.cache_data.clear()
-                            st.success(f"🎉 Berhasil membuat {len(new_rows)} konten baru ke antrean Google Sheets!")
+                            st.success(f"🎉 Berhasil membuat {len(new_rows)} antrean postingan untuk {len(target_accounts_to_run)} akun!")
                             st.rerun()
                 except Exception as ex:
                     st.error(f"Terjadi kesalahan: {ex}")
@@ -512,23 +533,24 @@ with tabs[1]:
                         st.rerun()
 
 # ==============================================================================
-# TAB 3: CONTENT STUDIO (INTERVAL 2 JAM - 1 HARI & KURASI HINGGA 5 PRODUK)
+# TAB 3: CONTENT STUDIO (INTERVAL 2 JAM - 1 HARI & DUKUNGAN ALL ACCOUNTS)
 # ==============================================================================
 with tabs[2]:
     st.subheader("✍️ Content Studio (Pembuat Konten Manual & AI)")
-    st.caption("Atur target akun, waktu mulai, jumlah postingan, selang waktu (2 Jam s/d 1 Hari), dan kurasi hingga 5 produk.")
+    st.caption("Atur target akun (bisa pilih Single atau Semua Akun), waktu mulai, jumlah postingan, selang waktu (2 Jam s/d 1 Hari), dan kurasi hingga 5 produk.")
 
-    acc_names = [a["name"] for a in acc_records] if acc_records else []
+    acc_names_all = [str(a["name"]).strip() for a in acc_records if str(a.get("name", "")).strip()]
+    account_choices = ["-- Semua Akun (All Accounts) --"] + acc_names_all if acc_names_all else ["Belum ada akun"]
     all_ready_p = [p for p in raw_prods if str(p.get("status", "")).strip().upper() == "READY"]
 
     if "manual_generated_posts" not in st.session_state:
         st.session_state["manual_generated_posts"] = []
 
-    # 1. PENGATURAN UTAMA: TARGET, WAKTU MULAI, JUMLAH & SELANG WAKTU (2 JAM - 1 HARI)
+    # 1. PENGATURAN UTAMA: TARGET (SINGLE / ALL), WAKTU MULAI, JUMLAH & INTERVAL
     st.write("#### ⚙️ 1. Pengaturan Jadwal & Frekuensi")
     c_set1, c_set2, c_set3, c_set4 = st.columns(4)
     with c_set1:
-        target_account = st.selectbox("🎯 Target Akun Threads", acc_names if acc_names else ["Belum ada akun"])
+        target_account = st.selectbox("🎯 Target Akun Threads", account_choices)
     with c_set2:
         schedule_d = st.date_input("📅 Tanggal Mulai", value=now.date(), key="cs_date")
     with c_set3:
@@ -643,7 +665,7 @@ with tabs[2]:
                             })
 
                         st.session_state["manual_generated_posts"] = gen_list
-                        st.success(f"🎉 Berhasil meracik {len(gen_list)} draf kurasi! Interval: {interval_mins // 60 if interval_mins < 1440 else 24} Jam.")
+                        st.success(f"🎉 Berhasil meracik {len(gen_list)} draf kurasi!")
                     except Exception as e:
                         st.error(f"Gagal generate: {e}")
 
@@ -704,7 +726,7 @@ with tabs[2]:
                         })
 
                     st.session_state["manual_generated_posts"] = gen_list
-                    st.success(f"🎉 Berhasil membuat {len(gen_list)} draf! Selang waktu: {interval_mins // 60 if interval_mins < 1440 else 24} Jam.")
+                    st.success(f"🎉 Berhasil membuat {len(gen_list)} draf!")
                 except Exception as e:
                     st.error(f"Gagal generate: {e}")
 
@@ -784,20 +806,20 @@ with tabs[2]:
 
     st.divider()
 
-    # --- 3. PREVIEW & SIMPAN KE GOOGLE SHEETS TAB 'DATA' ---
+    # --- 3. PREVIEW & SIMPAN KE GOOGLE SHEETS TAB 'DATA' (DUKUNGAN ALL ACCOUNTS) ---
     st.write("#### 📝 3. Preview Draf Antrean & Finalisasi")
-    st.caption("Periksa dan sunting teks sebelum menyimpan ke Google Sheets.")
+    st.caption("Periksa dan sunting teks sebelum menyimpan ke Google Sheets. Jika memilih 'All Accounts', setiap akun akan menerima postingan ini.")
 
     posts_to_show = st.session_state.get("manual_generated_posts", [])
 
     if not posts_to_show:
         st.info("Belum ada draf yang digenerate. Klik tombol generate di atas untuk mulai membuat postingan.")
     else:
-        st.write(f"Total antrean siap simpan: **{len(posts_to_show)} postingan**")
+        st.write(f"Total draf siap dijadwalkan: **{len(posts_to_show)} postingan** (Target: `{target_account}`)")
         
         for idx_p, p_item in enumerate(posts_to_show):
             with st.container():
-                st.markdown(f"**📌 Post #{idx_p + 1} — Jadwal: `{p_item['date']} {p_item['time']} WIB`**")
+                st.markdown(f"**📌 Post #{idx_p + 1} — Jadwal: `{p_item['date']} {p_item['time']} WIB` | Target: `{p_item['account']}`**")
                 col_box1, col_box2 = st.columns(2)
                 with col_box1:
                     p_item["main"] = st.text_area(f"Teks Utama #{idx_p + 1}", value=p_item["main"], height=90, key=f"preview_main_{idx_p}")
@@ -812,21 +834,31 @@ with tabs[2]:
                 if sh_obj:
                     with st.spinner("Menyimpan ke antrean Google Sheets..."):
                         try:
+                            # Tentukan daftar target akun
+                            if target_account == "-- Semua Akun (All Accounts) --":
+                                accounts_to_save = acc_names_all
+                            else:
+                                accounts_to_save = [target_account]
+
                             data_ws = sh_obj.worksheet("data")
-                            for itm in posts_to_show:
-                                data_ws.append_row([
-                                    itm["date"],
-                                    itm["time"],
-                                    itm["account"],
-                                    itm["main"],
-                                    "",
-                                    itm["reply"],
-                                    itm["link"],
-                                    "PENDING",
-                                    "", "", ""
-                                ])
+                            total_saved = 0
+                            for acc_name_single in accounts_to_save:
+                                for itm in posts_to_show:
+                                    data_ws.append_row([
+                                        itm["date"],
+                                        itm["time"],
+                                        acc_name_single,
+                                        itm["main"],
+                                        "",
+                                        itm["reply"],
+                                        itm["link"],
+                                        "PENDING",
+                                        "", "", ""
+                                    ])
+                                    total_saved += 1
+                            
                             st.cache_data.clear()
-                            st.success(f"🎉 Berhasil menyimpan {len(posts_to_show)} postingan ke tab 'data'!")
+                            st.success(f"🎉 Berhasil menyimpan {total_saved} antrean postingan untuk {len(accounts_to_save)} akun!")
                             st.session_state["manual_generated_posts"] = []
                             st.rerun()
                         except Exception as ex:
@@ -847,11 +879,108 @@ with tabs[3]:
         st.info("Belum ada antrean di tab data.")
 
 # ==============================================================================
-# TAB 5: AKUN THREADS
+# TAB 5: AKUN THREADS & DIAGNOSTIK SISTEM (TAMBAH AKUN & TES KONEKSI)
 # ==============================================================================
 with tabs[4]:
-    st.subheader("⚙️ Akun Threads Terhubung")
+    st.subheader("⚙️ Manajemen Akun Threads & Diagnostik Sistem")
+    st.write("Kelola akun Threads, daftarkan akun baru, serta lakukan pengujian koneksi token Threads dan Google Gemini AI.")
+
+    # 1. Tabel Akun Terdaftar
+    st.write("#### 👥 Daftar Akun Terhubung")
     if acc_records:
-        st.dataframe(acc_records, use_container_width=True)
+        df_acc = pd.DataFrame(acc_records)
+        if "access_token" in df_acc.columns:
+            df_acc["token_preview"] = df_acc["access_token"].apply(lambda t: str(t)[:10] + "..." + str(t)[-6:] if len(str(t)) > 16 else "********")
+            st.dataframe(df_acc[["name", "user_id", "token_preview"]], use_container_width=True)
+        else:
+            st.dataframe(df_acc, use_container_width=True)
     else:
         st.warning("Belum ada akun yang terdaftar di tab Accounts.")
+
+    st.divider()
+
+    # 2. FITUR DIAGNOSTIK & TES KONEKSI (TES AKUN & TES AI)
+    st.write("#### 🩺 Diagnostik & Tes Koneksi")
+    c_diag1, c_diag2 = st.columns(2)
+
+    with c_diag1:
+        st.write("##### 🧵 Tes Koneksi Akun Threads")
+        st.caption("Verifikasi apakah Access Token Threads masih aktif dan valid ke Meta API.")
+        
+        if acc_records:
+            acc_to_test = st.selectbox("Pilih Akun untuk Dites:", [a["name"] for a in acc_records], key="sel_test_acc")
+            if st.button("🔍 Tes Token Akun Ini"):
+                chosen_acc = next((a for a in acc_records if a["name"] == acc_to_test), None)
+                if chosen_acc:
+                    with st.spinner(f"Menghubungi Threads Graph API untuk '{acc_to_test}'..."):
+                        res = check_threads_token(str(chosen_acc["user_id"]), str(chosen_acc["access_token"]))
+                        if "id" in res:
+                            st.success(
+                                f"✅ **Koneksi Threads Berhasil!**\n\n"
+                                f"- **Username:** @{res.get('username', 'N/A')}\n"
+                                f"- **User ID:** `{res.get('id')}`\n"
+                                f"- **Status:** Token Aktif & Siap Posting"
+                            )
+                        else:
+                            st.error(f"❌ **Koneksi Gagal / Token Expired:**\n`{res}`")
+        else:
+            st.info("Tambahkan akun terlebih dahulu untuk melakukan tes koneksi.")
+
+    with c_diag2:
+        st.write("##### 🤖 Tes Koneksi Google Gemini AI")
+        st.caption("Uji coba respon model Gemini API dengan AI_API_KEY yang terpasang.")
+        if st.button("⚡ Tes Respon Gemini AI"):
+            with st.spinner("Mengirim prompt ping ke Gemini API..."):
+                try:
+                    t_start = time_lib.time()
+                    ai_reply = call_gemini("Halo! Balas hanya dengan kalimat persis: 'Koneksi Gemini AI Aktif & Berhasil!'")
+                    elapsed = round(time_lib.time() - t_start, 2)
+                    st.success(
+                        f"✅ **Gemini AI Terhubung Sempurna!**\n\n"
+                        f"- **Respon:** *'{ai_reply}'*\n"
+                        f"- **Latensi:** `{elapsed} detik`\n"
+                        f"- **Status:** Siap Menulis Copywriting Otomatis"
+                    )
+                except Exception as ex:
+                    st.error(f"❌ **Koneksi Gemini AI Gagal:** {ex}")
+
+    st.divider()
+
+    # 3. FITUR TAMBAH AKUN THREADS BARU
+    st.write("#### ➕ Tambah Akun Threads Baru")
+    st.caption("Kredensial akun akan langsung disimpan ke tab 'Accounts' di Google Sheets Anda.")
+
+    with st.form("form_add_threads_acc"):
+        col_acc1, col_acc2 = st.columns(2)
+        with col_acc1:
+            new_acc_name = st.text_input("Nama Label Akun *", placeholder="Misal: akun_kedua atau faisal_lifestyle")
+            new_acc_uid = st.text_input("Threads User ID *", placeholder="Misal: 17841400000000000")
+        with col_acc2:
+            new_acc_token = st.text_area("Long-Lived Access Token *", placeholder="THQW... (Token Threads dari Meta Developers)", height=105)
+
+        test_before_add = st.checkbox("🔍 Validasi & tes token ini ke Meta Threads sebelum menyimpan", value=True)
+        btn_add_acc = st.form_submit_button("💾 Simpan Akun ke Google Sheets", type="primary")
+
+        if btn_add_acc:
+            if not new_acc_name.strip() or not new_acc_uid.strip() or not new_acc_token.strip():
+                st.error("Nama label akun, User ID, dan Access Token wajib diisi!")
+            else:
+                passed_test = True
+                if test_before_add:
+                    with st.spinner("Memvalidasi token ke Meta Threads API..."):
+                        test_res = check_threads_token(new_acc_uid.strip(), new_acc_token.strip())
+                        if "id" not in test_res:
+                            passed_test = False
+                            st.error(f"❌ Validasi Token Gagal! Meta API menolak token ini: {test_res}")
+
+                if passed_test:
+                    sh_obj = get_spreadsheet()
+                    if sh_obj:
+                        try:
+                            acc_ws = sh_obj.worksheet("Accounts")
+                            acc_ws.append_row([new_acc_name.strip(), new_acc_uid.strip(), new_acc_token.strip()])
+                            st.cache_data.clear()
+                            st.success(f"🎉 Akun Threads '{new_acc_name}' berhasil didaftarkan dan disimpan ke Google Sheets!")
+                            st.rerun()
+                        except Exception as e_acc:
+                            st.error(f"Gagal menyimpan akun ke Google Sheets: {e_acc}")
