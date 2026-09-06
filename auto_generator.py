@@ -1,6 +1,13 @@
-import os, json, base64, random, logging
+import os
+import re
+import json
+import base64
+import random
+import logging
 from datetime import datetime
-import pytz, requests, gspread
+import pytz
+import requests
+import gspread
 from google.oauth2.service_account import Credentials
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -11,14 +18,132 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 GCP_CREDS_BASE64 = os.environ.get("GCP_CREDS_BASE64")
 AI_API_KEY = os.environ.get("AI_API_KEY")
 
-SLOTS = ["08:15", "11:45", "15:30", "18:45", "21:15"]
-
 VIRAL_PROMPTS = [
     "Dilema dunia kerja, lembur, dan overthinking karir usia 20-an",
     "Perdebatan belanja impulsif vs hemat yang selalu berakhir boncos",
     "Curhat realita tinggal di kota besar dan susahnya menabung",
-    "Humor linimasa soal tanggal tua dan godaan checkout marketplace"
+    "Humor linimasa soal tanggal tua dan godaan checkout marketplace",
+    "Pilihan hidup karir stabil vs bangun bisnis sendiri yang serba spekulatif"
 ]
+
+CLOSING_NARRATIVES = [
+    "Btw banyak yang nanya di DM, ini link toko resmi tempat aku beli ya mumpung masih promo:",
+    "Biar gak salah beli atau dapet yang zonk, aku taro link official store-nya di sini ya:",
+    "Yang mau samaan atau sekadar cek review pembeli lainnya, langsung kepoin di sini:",
+    "Spill link belinya di sini ya guys, kemarin pas aku cek lagi ada diskon lumayan:",
+    "Daripada ribet nyari tokonya satu-satu, langsung meluncur ke toko resminya di sini:",
+    "Kalo mau checkout mending sekarang sebelum kehabisan stok, link belinya di sini:",
+    "Kemarin dapet harga flash sale di toko ini dan pengirimannya cepet, linknya:",
+    "Biar dapet garansi resmi dan barang original, belinya lewat link ini ya:",
+    "Buat yang minta spill racunnya, ini link toko terpercaya yang sering aku pake:",
+    "Yang mau CO taro keranjang dulu aja, mumpung vouchernya masih aktif di sini:"
+]
+
+def parse_flexible_dt(s: str) -> datetime:
+    cleaned = str(s).strip().replace("'", "")
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})$", cleaned)
+    if not m:
+        raise ValueError(f"Format datetime tidak sesuai: {s}")
+    year, month, day, hour, minute = map(int, m.groups())
+    return TZ.localize(datetime(year, month, day, hour, minute))
+
+def pick_length_by_bias(bias: str) -> str:
+    lengths = ["Pendek", "Sedang", "Panjang"]
+    if "Dominan Pendek" in bias:
+        weights = [0.60, 0.25, 0.15]
+    elif "Dominan Panjang" in bias:
+        weights = [0.15, 0.25, 0.60]
+    elif "Dominan Sedang" in bias:
+        weights = [0.20, 0.60, 0.20]
+    else:
+        weights = [0.33, 0.34, 0.33]
+    return random.choices(lengths, weights=weights, k=1)[0]
+
+def get_length_prompt_desc(length_opt: str) -> str:
+    if "Pendek" in length_opt:
+        return "Tulis sangat ringkas, padat, dan to-the-point (maksimal 100-120 karakter, 1-2 kalimat saja)."
+    elif "Panjang" in length_opt:
+        return "Tulis lebih panjang, detail, dan mengalir seperti storytelling mendalam (sekitar 300-450 karakter)."
+    else:
+        return "Tulis dengan panjang sedang standar Threads (sekitar 180-250 karakter)."
+
+def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
+    if total_count <= 0:
+        return []
+    if total_count == 1:
+        return ["12:00"]
+    h1, m1 = map(int, start_time_str.split(":"))
+    h2, m2 = map(int, end_time_str.split(":"))
+    start_minutes = h1 * 60 + m1
+    end_minutes = h2 * 60 + m2
+    step = (end_minutes - start_minutes) / (total_count - 1)
+    slots = []
+    for i in range(total_count):
+        curr_m = 5 * round(int(round(start_minutes + i * step)) / 5)
+        slots.append(f"{curr_m // 60:02d}:{curr_m % 60:02d}")
+    return slots
+
+def arrange_post_types(num_viral, num_affiliate):
+    total = num_viral + num_affiliate
+    if total == 0:
+        return []
+    if num_viral == 0:
+        return ["affiliate"] * num_affiliate
+    if num_affiliate == 0:
+        return ["viral"] * num_viral
+    if num_viral == 1:
+        return ["viral"] + ["affiliate"] * num_affiliate
+    step = total / num_viral
+    viral_indices = set()
+    for i in range(num_viral):
+        viral_indices.add(min(int(round(i * step)), total - 1))
+    curr = 0
+    while len(viral_indices) < num_viral and curr < total:
+        viral_indices.add(curr)
+        curr += 1
+    return ["viral" if i in viral_indices else "affiliate" for i in range(total)]
+
+def is_active_window(sh) -> tuple:
+    try:
+        cfg_ws = sh.worksheet("Config")
+        raw_cfg = dict(cfg_ws.get_all_values())
+        start_str = raw_cfg.get("start_datetime", "").strip()
+        end_str = raw_cfg.get("end_datetime", "").strip()
+
+        try:
+            num_viral = int(raw_cfg.get("daily_viral_count", 1))
+        except:
+            num_viral = 1
+
+        try:
+            num_affiliate = int(raw_cfg.get("daily_affiliate_count", 4))
+        except:
+            num_affiliate = 4
+
+        target_acc = raw_cfg.get("target_autopilot_account", "-- Semua Akun (All Accounts) --").strip()
+        
+        try:
+            reply_count = int(raw_cfg.get("reply_count", 1))
+        except:
+            reply_count = 1
+
+        length_bias = str(raw_cfg.get("length_bias", "Dominan Sedang (Lebih banyak standar)")).strip()
+
+        if not start_str or not end_str:
+            return True, num_viral, num_affiliate, target_acc, reply_count, length_bias
+
+        now = datetime.now(TZ)
+        start_dt = parse_flexible_dt(start_str)
+        end_dt = parse_flexible_dt(end_str)
+
+        if not (start_dt <= now <= end_dt):
+            logger.info(f"Di luar rentang aktif ({start_str} s/d {end_str}). Generator dihentikan.")
+            return False, num_viral, num_affiliate, target_acc, reply_count, length_bias
+
+        return True, num_viral, num_affiliate, target_acc, reply_count, length_bias
+    except Exception as e:
+        logger.warning(f"Gagal membaca tab Config: {e}. Menggunakan default.")
+        return True, 1, 4, "-- Semua Akun (All Accounts) --", 1, "Dominan Sedang"
 
 def get_sheets_client():
     creds_json = base64.b64decode(GCP_CREDS_BASE64).decode("utf-8")
@@ -28,69 +153,150 @@ def get_sheets_client():
     )
     return gspread.authorize(creds)
 
-def is_active_window(sh):
-    try:
-        cfg = dict(sh.worksheet("Config").get_all_values())
-        start_str, end_str = cfg.get("start_datetime", "").strip(), cfg.get("end_datetime", "").strip()
-        if not start_str or not end_str:
-            return True
-        now = datetime.now(TZ)
-        start_dt = TZ.localize(datetime.strptime(start_str, "%Y-%m-%d %H:%M"))
-        end_dt = TZ.localize(datetime.strptime(end_str, "%Y-%m-%d %H:%M"))
-        if not (start_dt <= now <= end_dt):
-            logger.info(f"Di luar jadwal aktif ({start_str} s/d {end_str}). Generator berhenti.")
-            return False
-        return True
-    except Exception as e:
-        logger.warning(f"Lewati cek Config: {e}")
-        return True
+def call_gemini(prompt: str) -> str:
+    key = AI_API_KEY.strip() if AI_API_KEY else ""
+    fallback_models = [
+        ("v1", "gemini-1.5-flash"),
+        ("v1", "gemini-1.5-pro"),
+        ("v1beta", "gemini-1.5-flash"),
+        ("v1beta", "gemini-2.0-flash"),
+        ("v1beta", "gemini-1.5-flash-latest"),
+    ]
+    last_err = None
+    for ver, m_name in fallback_models:
+        url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        try:
+            res = requests.post(url, json=payload, timeout=30).json()
+            if "candidates" in res and res["candidates"]:
+                return res["candidates"][0]["content"]["parts"][0]["text"].strip()
+            last_err = res
+        except Exception as e:
+            last_err = e
+    raise Exception(f"Gemini API error: {last_err}")
 
-def call_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={AI_API_KEY}"
-    res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30).json()
-    return res["candidates"][0]["content"]["parts"][0]["text"].strip()
+def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, reply_count: int) -> list:
+    if reply_count <= 0 or not aff_link:
+        return []
+
+    try:
+        prompt_closing = (
+            f"Tulis 1 kalimat pengantar santai dan natural (maksimal 70 karakter) sebelum spill link toko pembelian '{prod_name}'. "
+            f"Contoh variasi tema: info official store, voucher diskon toko, atau alasan checkout mumpung ready. "
+            f"Tanpa hashtag, tanpa tanda kutip, dan JANGAN tulis link-nya."
+        )
+        closing_intro = call_gemini(prompt_closing).strip().strip('"').strip("'")
+        if not closing_intro or len(closing_intro) > 100:
+            closing_intro = random.choice(CLOSING_NARRATIVES)
+    except Exception:
+        closing_intro = random.choice(CLOSING_NARRATIVES)
+
+    final_reply = f"{closing_intro}\n{aff_link}"
+
+    if reply_count == 1:
+        return [final_reply]
+
+    intermediate_count = reply_count - 1
+    prompt_intermediate = (
+        f"Untuk postingan Threads tentang produk '{prod_name}' (Keunggulan: '{prod_hl}'). "
+        f"Tulis persis {intermediate_count} tweet balasan pendek lanjutan yang menyambung secara bertahap (sebelum spill link). "
+        f"Gaya santai, relate, jujur seperti curhat pengalaman pakai. Pisahkan setiap balasan dengan tanda '---'. "
+        f"Maksimal 120 karakter per balasan. DILARANG pakai hashtag dan JANGAN sebutkan link."
+    )
+    try:
+        raw_res = call_gemini(prompt_intermediate)
+        parts = [p.strip() for p in raw_res.split("---") if p.strip()]
+        replies = parts[:intermediate_count]
+        while len(replies) < intermediate_count:
+            replies.append("Worth it banget sih ini buat pemakaian jangka panjang.")
+    except Exception:
+        replies = ["Jujur ini kepake banget buat kebutuhan sehari-hari." for _ in range(intermediate_count)]
+
+    replies.append(final_reply)
+    return replies
 
 def main():
     if not SPREADSHEET_ID or not GCP_CREDS_BASE64 or not AI_API_KEY:
-        logger.error("Kredensial tidak lengkap.")
+        logger.error("Kredensial SPREADSHEET_ID, GCP_CREDS_BASE64, atau AI_API_KEY belum disetel.")
         return
 
     client = get_sheets_client()
     sh = client.open_by_key(SPREADSHEET_ID)
 
-    if not is_active_window(sh):
+    active, num_viral, num_affiliate, target_config_acc, reply_count, length_bias = is_active_window(sh)
+    if not active:
         return
 
-    accounts = sh.worksheet("Accounts").get_all_records()
+    accounts_ws = sh.worksheet("Accounts")
+    accounts = accounts_ws.get_all_records()
     if not accounts:
+        logger.error("Tab Accounts kosong.")
         return
-    target_account = accounts[0]["name"]
+
+    all_acc_names = [str(a["name"]).strip() for a in accounts if str(a.get("name", "")).strip()]
+    if target_config_acc == "-- Semua Akun (All Accounts) --" or not target_config_acc:
+        target_accounts_list = all_acc_names
+    else:
+        target_accounts_list = [target_config_acc]
 
     products_ws = sh.worksheet("Products")
     prod_rows = products_ws.get_all_records()
-    ready_prods = [p for p in prod_rows if str(p.get("status")).upper() == "READY"]
+    ready_prods = [p for p in prod_rows if str(p.get("status", "")).strip().upper() == "READY"]
+
+    total_needed = num_viral + num_affiliate
+    slots = generate_slots(total_needed)
+    types = arrange_post_types(num_viral, num_affiliate)
 
     today_str = datetime.now(TZ).strftime("%Y-%m-%d")
     data_ws = sh.worksheet("data")
     new_entries = []
 
-    # Slot 1: Postingan Viral (08:15)
-    viral_topic = random.choice(VIRAL_PROMPTS)
-    prompt_v = f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: {viral_topic}. Maksimal 250 karakter. Jangan pakai hashtag."
-    v_text = call_gemini(prompt_v)
-    new_entries.append([today_str, SLOTS[0], target_account, v_text, "", "", "", "PENDING", "", "", ""])
+    for acc_name in target_accounts_list:
+        if num_affiliate > 0:
+            if len(ready_prods) >= num_affiliate:
+                sampled = random.sample(ready_prods, num_affiliate)
+            else:
+                sampled = random.choices(ready_prods, k=num_affiliate)
+        else:
+            sampled = []
 
-    # Slot 2-5: Postingan Affiliate
-    sampled = random.sample(ready_prods, min(4, len(ready_prods)))
-    for i, prod in enumerate(sampled, start=1):
-        prompt_aff = f"Buat hook teks Threads gaya curhat/solutif santai tanpa hard-selling untuk barang '{prod['product_name']}' ({prod.get('highlight', '')}). Maks 250 karakter."
-        main_aff = call_gemini(prompt_aff)
-        reply_aff = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
-        new_entries.append([today_str, SLOTS[i], target_account, main_aff, "", reply_aff, prod["affiliate_link"], "PENDING", "", "", ""])
+        aff_counter = 0
+        for slot_time, p_type in zip(slots, types):
+            chosen_len = pick_length_by_bias(length_bias)
+            len_desc = get_length_prompt_desc(chosen_len)
+
+            if p_type == "viral":
+                viral_topic = random.choice(VIRAL_PROMPTS)
+                prompt_v = (
+                    f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: '{viral_topic}'. "
+                    f"{len_desc} Tanpa hashtag, tanpa tanda kutip."
+                )
+                v_text = call_gemini(prompt_v)
+                new_entries.append([today_str, slot_time, acc_name, v_text, "", "", "", "PENDING", "", "", ""])
+            else:
+                prod = sampled[aff_counter]
+                aff_counter += 1
+                prompt_aff = (
+                    f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk barang: '{prod['product_name']}' "
+                    f"(Keunggulan: {prod.get('highlight', '')}). {len_desc} Tanpa hashtag dan tanda kutip."
+                )
+                main_aff = call_gemini(prompt_aff)
+                
+                # Buat balasan bertingkat dengan narasi variatif dan link di akhir
+                replies_chain = generate_affiliate_replies(
+                    prod['product_name'],
+                    prod.get('highlight', ''),
+                    prod['affiliate_link'],
+                    reply_count
+                )
+                joined_replies = "\n---REPLY---\n".join(replies_chain)
+
+                new_entries.append([today_str, slot_time, acc_name, main_aff, "", joined_replies, prod["affiliate_link"], "PENDING", "", "", ""])
 
     for entry in new_entries:
         data_ws.append_row(entry)
-    logger.info("Berhasil generate 5 antrean konten Threads.")
+
+    logger.info(f"Berhasil menambahkan {len(new_entries)} konten autopilot (Rantai reply={reply_count}, Pola={length_bias}).")
 
 if __name__ == "__main__":
     main()
