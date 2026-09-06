@@ -90,8 +90,14 @@ with tabs[0]:
     st.subheader("Pengaturan Jadwal Aktif Autopilot")
     st.write("Atur tanggal dan jam mulai serta berakhirnya sistem autopilot. Di luar rentang ini, bot tidak akan memposting.")
 
+    # Membaca tab Config dengan aman (hanya mengambil Kolom A dan B)
     cfg_sheet = sh.worksheet("Config")
-    cfg_data = dict(cfg_sheet.get_all_values())
+    cfg_rows = cfg_sheet.get_all_values()
+    cfg_data = {}
+    for r in cfg_rows:
+        if len(r) >= 2 and r[0].strip():
+            cfg_data[r[0].strip()] = r[1].strip()
+
     raw_start = cfg_data.get("start_datetime", "2026-09-06 08:00")
     raw_end = cfg_data.get("end_datetime", "2026-09-30 22:00")
 
@@ -157,7 +163,7 @@ with tabs[0]:
     st.divider()
 
     st.write("#### ⚡ Eksekusi Cepat: Generate 5 Konten Hari Ini")
-    st.caption("Menghasilkan 1 konten viral (08:15) dan 4 konten affiliate acak langsung ke tab antrean `data`.")
+    st.caption("Menghasilkan 1 konten viral (08:15) dan 4 konten affiliate acak langsung ke antrean `data`.")
 
     if st.button("🚀 Generate 5 Konten Autopilot Sekarang"):
         with st.spinner("Sedang menghubungi Gemini AI dan menyusun antrean..."):
@@ -212,17 +218,15 @@ with tabs[0]:
 # ==============================================================================
 with tabs[1]:
     st.subheader("📦 Katalog Produk Affiliate")
-    st.write("Katalog ini mampu menampung puluhan produk. Bot AI secara acak memilih produk berstatus **READY** setiap hari.")
+    st.write("Katalog ini menampung puluhan produk. Bot AI secara acak memilih produk berstatus **READY** setiap hari.")
 
     prod_ws = sh.worksheet("Products")
     raw_prods = prod_ws.get_all_records()
 
-    # Kolom standar
     expected_cols = ["product_name", "highlight", "affiliate_link", "category", "status"]
 
     if raw_prods:
         df_prods = pd.DataFrame(raw_prods)
-        # Pastikan kolom sesuai
         for col in expected_cols:
             if col not in df_prods.columns:
                 df_prods[col] = ""
@@ -230,7 +234,6 @@ with tabs[1]:
     else:
         df_prods = pd.DataFrame(columns=expected_cols)
 
-    # Indikator Ringkasan
     total_items = len(df_prods)
     ready_items = len(df_prods[df_prods["status"].astype(str).str.upper() == "READY"]) if not df_prods.empty else 0
 
@@ -241,9 +244,8 @@ with tabs[1]:
 
     st.divider()
 
-    # --- FITUR 1: EDIT LANGSUNG DI TABEL (EXCEL STYLE) ---
     st.write("#### 📝 Edit Langsung di Tabel (Bisa ubah nama, link, highlight, dan status)")
-    st.caption("Klik dua kali pada kotak mana saja untuk mengedit. Anda juga bisa menambah atau menghapus baris langsung di tabel ini.")
+    st.caption("Klik dua kali pada sel mana saja untuk mengedit. Anda juga bisa menambah atau menghapus baris langsung di tabel ini.")
 
     edited_df = st.data_editor(
         df_prods,
@@ -267,7 +269,6 @@ with tabs[1]:
     if st.button("💾 Simpan Semua Perubahan Tabel ke Google Sheets", type="primary"):
         with st.spinner("Menyimpan seluruh katalog ke Google Sheets..."):
             try:
-                # Bersihkan tab Products dan tulis ulang
                 prod_ws.clear()
                 header = [expected_cols]
                 data_rows = edited_df.fillna("").values.tolist()
@@ -279,8 +280,7 @@ with tabs[1]:
 
     st.divider()
 
-    # --- FITUR 2: EDIT SPESIFIK LEWAT FORM (SANGAT MUDAH DI HP) ---
-    with st.expander("✏️ Atau Edit Produk Tertentu via Form (Pilihan praktis di HP)"):
+    with st.expander("✏️ Atau Edit Produk Tertentu via Form (Praktis di Layar Ponsel)"):
         if not df_prods.empty:
             prod_titles = df_prods["product_name"].tolist()
             selected_p = st.selectbox("Pilih produk yang ingin diedit:", prod_titles)
@@ -304,7 +304,7 @@ with tabs[1]:
 
                 btn_save_single = st.form_submit_button("Simpan Perubahan Produk Ini")
                 if btn_save_single:
-                    sheet_row = p_idx + 2  # baris 1 header
+                    sheet_row = p_idx + 2
                     prod_ws.update_cell(sheet_row, 1, e_name)
                     prod_ws.update_cell(sheet_row, 2, e_hl)
                     prod_ws.update_cell(sheet_row, 3, e_link)
@@ -315,7 +315,6 @@ with tabs[1]:
         else:
             st.info("Katalog masih kosong.")
 
-    # --- FITUR 3: TAMBAH PRODUK BARU SATU PER SATU ---
     with st.expander("➕ Tambah 1 Produk Baru"):
         with st.form("form_add_single"):
             col_a1, col_a2 = st.columns(2)
