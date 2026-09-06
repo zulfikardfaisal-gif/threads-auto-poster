@@ -53,7 +53,7 @@ def get_spreadsheet():
         return None
     return client.open_by_key(SPREADSHEET_ID)
 
-# --- CACHE DATA READING UNTUK MENCEGAH ERROR 429 RATE LIMIT ---
+# --- CACHE DATA READING UNTUK MENCEGAH ERROR 429 ---
 @st.cache_data(ttl=60)
 def load_all_sheets_data():
     client = get_gspread_client()
@@ -97,6 +97,63 @@ def parse_dt(s: str) -> datetime:
     y, mo, d, h, mi = map(int, m.groups())
     return TZ.localize(datetime(y, mo, d, h, mi))
 
+# Helper distribusi slot jam tayang otomatis
+def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
+    if total_count <= 0:
+        return []
+    if total_count == 1:
+        return ["12:00"]
+    h1, m1 = map(int, start_time_str.split(":"))
+    h2, m2 = map(int, end_time_str.split(":"))
+    start_minutes = h1 * 60 + m1
+    end_minutes = h2 * 60 + m2
+    total_span = end_minutes - start_minutes
+    step = total_span / (total_count - 1)
+    slots = []
+    for i in range(total_count):
+        curr_m = int(round(start_minutes + i * step))
+        curr_m = 5 * round(curr_m / 5)
+        h = curr_m // 60
+        m = curr_m % 60
+        slots.append(f"{h:02d}:{m:02d}")
+    return slots
+
+# Helper penyusunan urutan konten (Viral vs Affiliate)
+def arrange_post_types(num_viral, num_affiliate):
+    total = num_viral + num_affiliate
+    if total == 0:
+        return []
+    if num_viral == 0:
+        return ["affiliate"] * num_affiliate
+    if num_affiliate == 0:
+        return ["viral"] * num_viral
+    if num_viral == 1:
+        return ["viral"] + ["affiliate"] * num_affiliate
+    step = total / num_viral
+    viral_indices = set()
+    for i in range(num_viral):
+        idx = int(round(i * step))
+        viral_indices.add(min(idx, total - 1))
+    curr = 0
+    while len(viral_indices) < num_viral and curr < total:
+        viral_indices.add(curr)
+        curr += 1
+    return ["viral" if i in viral_indices else "affiliate" for i in range(total)]
+
+# Helper update tab Config tanpa merusak format
+def update_config_keys(sh_obj, kv_pairs: dict):
+    cfg_ws = sh_obj.worksheet("Config")
+    all_vals = cfg_ws.get_all_values()
+    existing_keys = {}
+    for row_idx, r in enumerate(all_vals, start=1):
+        if r and r[0].strip():
+            existing_keys[r[0].strip()] = row_idx
+    for k, v in kv_pairs.items():
+        if k in existing_keys:
+            cfg_ws.update_cell(existing_keys[k], 2, str(v))
+        else:
+            cfg_ws.append_row([k, str(v)])
+
 # Helper Gemini
 def call_gemini(prompt: str) -> str:
     if not AI_API_KEY:
@@ -115,7 +172,7 @@ def call_gemini(prompt: str) -> str:
 c_head1, c_head2 = st.columns([4, 1])
 with c_head1:
     st.title("🧵 Threads Affiliate & Autopilot Dashboard")
-    st.caption("Pusat kendali pembuatan konten manual, Content Studio AI (Interval 2 Jam - 1 Hari & Kurasi 5 Produk), katalog produk, dan autopilot.")
+    st.caption("Pusat kendali konten manual, pengaturan autopilot dinamis (Viral & Affiliate), dan katalog produk.")
 with c_head2:
     if st.button("🔄 Segarkan Data Sheets"):
         st.cache_data.clear()
@@ -126,7 +183,7 @@ try:
     cfg_data, raw_prods, acc_records, all_data = load_all_sheets_data()
 except Exception as e:
     if "429" in str(e):
-        st.error("⏳ Google Sheets API sedang terkena jeda kuota request per menit. Mohon tunggu sekitar 30–60 detik lalu klik tombol '🔄 Segarkan Data Sheets' di pojok kanan atas.")
+        st.error("⏳ Google Sheets API sedang terkena batasan kuota request. Tunggu 30-60 detik lalu klik '🔄 Segarkan Data Sheets'.")
     else:
         st.error(f"Gagal memuat data Google Sheets: {e}")
     st.stop()
@@ -140,14 +197,24 @@ tabs = st.tabs([
 ])
 
 # ==============================================================================
-# TAB 1: KONTROL AUTOPILOT (START & END DATE / TIME)
+# TAB 1: KONTROL AUTOPILOT (JADWAL & KUOTA KONTEN HARIAN)
 # ==============================================================================
 with tabs[0]:
-    st.subheader("Pengaturan Jadwal Aktif Autopilot")
-    st.write("Atur tanggal dan jam mulai serta berakhirnya sistem autopilot. Di luar rentang ini, bot tidak akan memposting.")
+    st.subheader("Pengaturan Jadwal & Alokasi Autopilot")
+    st.write("Atur tanggal aktif serta porsi jumlah konten harian antara **Viral Booster** dan **Affiliate Marketing**.")
 
     raw_start = cfg_data.get("start_datetime", "2026-09-06 08:00")
     raw_end = cfg_data.get("end_datetime", "2026-09-30 22:00")
+    
+    try:
+        cur_viral_count = int(cfg_data.get("daily_viral_count", 1))
+    except:
+        cur_viral_count = 1
+
+    try:
+        cur_affiliate_count = int(cfg_data.get("daily_affiliate_count", 4))
+    except:
+        cur_affiliate_count = 4
 
     now = datetime.now(TZ)
     try:
@@ -164,11 +231,18 @@ with tabs[0]:
         else:
             st.warning(f"🔴 **STATUS: AUTOPILOT NON-AKTIF / DI LUAR JADWAL**\n\nWaktu sekarang: `{now.strftime('%Y-%m-%d %H:%M:%S')} WIB`")
     with col_stat2:
-        st.info(f"**Jadwal Tersimpan Saat Ini:**\n- Mulai: `{raw_start} WIB`\n- Berakhir: `{raw_end} WIB`")
+        total_daily = cur_viral_count + cur_affiliate_count
+        st.info(
+            f"**Konfigurasi Tersimpan Saat Ini:**\n"
+            f"- Jadwal: `{raw_start} WIB` s/d `{raw_end} WIB`\n"
+            f"- Kuota Harian: **{total_daily} Konten** ({cur_viral_count} Viral + {cur_affiliate_count} Affiliate)"
+        )
 
     st.divider()
 
-    st.write("#### 🛠️ Ubah Rentang Jadwal Aktif")
+    st.write("#### 🛠️ Sesuaikan Jadwal & Jumlah Konten per Hari")
+    
+    # Form Tanggal
     col_d1, col_t1 = st.columns(2)
     with col_d1:
         try:
@@ -197,34 +271,65 @@ with tabs[0]:
             def_end_time = time(22, 0)
         end_t = st.time_input("Jam Berakhir (End Time)", value=def_end_time)
 
-    if st.button("💾 Simpan Pengaturan Jadwal ke Google Sheets", type="primary"):
+    # Form Pemilihan Jumlah Konten per Hari
+    st.write("##### 🎯 Porsi Konten Harian Autopilot")
+    col_q1, col_q2 = st.columns(2)
+    with col_q1:
+        sel_viral = st.number_input(
+            "🚀 Jumlah Konten Viral Booster per Hari",
+            min_value=0,
+            max_value=5,
+            value=cur_viral_count,
+            help="Postingan organik untuk memicu likes/komentar tanpa link produk"
+        )
+    with col_q2:
+        sel_affiliate = st.number_input(
+            "🛍️ Jumlah Konten Affiliate per Hari",
+            min_value=1,
+            max_value=10,
+            value=cur_affiliate_count,
+            help="Postingan rekomendasi produk beserta reply link Shopee affiliate"
+        )
+
+    total_plan = sel_viral + sel_affiliate
+    preview_slots = generate_slots(total_plan)
+    preview_types = arrange_post_types(sel_viral, sel_affiliate)
+
+    st.caption(f"💡 **Total Rencana:** {total_plan} postingan per hari.")
+    slot_badges = [f"`{preview_slots[i]} ({'Viral 🚀' if preview_types[i]=='viral' else 'Affiliate 🛍️'})`" for i in range(total_plan)]
+    st.markdown("🕒 **Distribusi Jam Tayang:** " + " ➜ ".join(slot_badges))
+
+    if st.button("💾 Simpan Pengaturan Autopilot ke Google Sheets", type="primary"):
         sh_obj = get_spreadsheet()
         if sh_obj:
             try:
                 new_start_str = f"'{start_d.strftime('%Y-%m-%d')} {start_t.strftime('%H:%M')}"
                 new_end_str = f"'{end_d.strftime('%Y-%m-%d')} {end_t.strftime('%H:%M')}"
-                cfg_sheet = sh_obj.worksheet("Config")
-                cfg_sheet.update_cell(2, 1, "start_datetime")
-                cfg_sheet.update_cell(2, 2, new_start_str)
-                cfg_sheet.update_cell(3, 1, "end_datetime")
-                cfg_sheet.update_cell(3, 2, new_end_str)
+                
+                update_config_keys(sh_obj, {
+                    "start_datetime": new_start_str,
+                    "end_datetime": new_end_str,
+                    "daily_viral_count": str(sel_viral),
+                    "daily_affiliate_count": str(sel_affiliate)
+                })
                 st.cache_data.clear()
-                st.success("✅ Jadwal autopilot berhasil diperbarui!")
+                st.success("✅ Pengaturan autopilot berhasil diperbarui dan disimpan!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Gagal menyimpan ke Google Sheets: {e}")
 
     st.divider()
 
-    st.write("#### ⚡ Eksekusi Cepat: Generate 5 Konten Hari Ini")
-    st.caption("Menghasilkan 1 konten viral (08:15) dan 4 konten affiliate acak langsung ke antrean `data`.")
+    # Tombol Eksekusi Cepat
+    st.write("#### ⚡ Eksekusi Cepat: Generate Konten Hari Ini")
+    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) langsung ke antrean `data`.")
 
-    if st.button("🚀 Generate 5 Konten Autopilot Sekarang"):
+    if st.button("🚀 Generate Konten Autopilot Sekarang"):
         sh_obj = get_spreadsheet()
         if not sh_obj:
             st.error("Koneksi spreadsheet tidak tersedia.")
         else:
-            with st.spinner("Sedang menghubungi Gemini AI dan menyusun antrean..."):
+            with st.spinner(f"Sedang meracik {total_plan} konten via Gemini AI..."):
                 try:
                     if not acc_records:
                         st.error("Tab Accounts masih kosong. Daftarkan akun terlebih dahulu.")
@@ -232,37 +337,46 @@ with tabs[0]:
                         target_acc = acc_records[0]["name"]
                         ready_prods = [p for p in raw_prods if str(p.get("status", "")).strip().upper() == "READY"]
 
-                        if len(ready_prods) < 4:
-                            st.error(f"Produk berstatus READY kurang dari 4 (hanya ada {len(ready_prods)}). Tambahkan di tab Katalog Produk.")
+                        if sel_affiliate > 0 and not ready_prods:
+                            st.error("Tidak ada produk berstatus READY di tab Products.")
                         else:
-                            slots = ["08:15", "11:45", "15:30", "18:45", "21:15"]
                             viral_prompts = [
                                 "Dilema dunia kerja, lembur, dan overthinking karir usia 20-an",
                                 "Perdebatan belanja impulsif vs hemat yang selalu berakhir boncos",
                                 "Curhat realita tinggal di kota besar dan susahnya menabung",
-                                "Humor linimasa soal tanggal tua dan godaan checkout marketplace"
+                                "Humor linimasa soal tanggal tua dan godaan checkout marketplace",
+                                "Gaya hidup FOMO vs ketenangan hidup sederhana yang hemat"
                             ]
                             today_str = now.strftime("%Y-%m-%d")
                             data_ws = sh_obj.worksheet("data")
                             new_rows = []
 
-                            topic = random.choice(viral_prompts)
-                            prompt_v = f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: {topic}. Maksimal 250 karakter. Tanpa hashtag dan tanda kutip."
-                            v_text = call_gemini(prompt_v)
-                            new_rows.append([today_str, slots[0], target_acc, v_text, "", "", "", "PENDING", "", "", ""])
+                            # Sample produk
+                            if len(ready_prods) >= sel_affiliate:
+                                sampled_prods = random.sample(ready_prods, sel_affiliate)
+                            else:
+                                sampled_prods = random.choices(ready_prods, k=sel_affiliate)
 
-                            sampled = random.sample(ready_prods, 4)
-                            for i, prod in enumerate(sampled, start=1):
-                                prompt_a = f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk: '{prod['product_name']}' ({prod.get('highlight', '')}). Maks 220 karakter. Tanpa hashtag dan tanda kutip."
-                                main_txt = call_gemini(prompt_a)
-                                reply_txt = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
-                                new_rows.append([today_str, slots[i], target_acc, main_txt, "", reply_txt, prod["affiliate_link"], "PENDING", "", "", ""])
+                            aff_idx = 0
+                            for slot_time, p_type in zip(preview_slots, preview_types):
+                                if p_type == "viral":
+                                    topic = random.choice(viral_prompts)
+                                    prompt_v = f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: {topic}. Maksimal 250 karakter. Tanpa hashtag dan tanda kutip."
+                                    v_text = call_gemini(prompt_v)
+                                    new_rows.append([today_str, slot_time, target_acc, v_text, "", "", "", "PENDING", "", "", ""])
+                                else:
+                                    prod = sampled_prods[aff_idx]
+                                    aff_idx += 1
+                                    prompt_a = f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk: '{prod['product_name']}' ({prod.get('highlight', '')}). Maks 220 karakter. Tanpa hashtag dan tanda kutip."
+                                    main_txt = call_gemini(prompt_a)
+                                    reply_txt = f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{prod['affiliate_link']}"
+                                    new_rows.append([today_str, slot_time, target_acc, main_txt, "", reply_txt, prod["affiliate_link"], "PENDING", "", "", ""])
 
                             for r in new_rows:
                                 data_ws.append_row(r)
 
                             st.cache_data.clear()
-                            st.success("🎉 Berhasil membuat 5 konten baru ke antrean Google Sheets!")
+                            st.success(f"🎉 Berhasil membuat {len(new_rows)} konten baru ke antrean Google Sheets!")
                             st.rerun()
                 except Exception as ex:
                     st.error(f"Terjadi kesalahan: {ex}")
@@ -272,7 +386,7 @@ with tabs[0]:
 # ==============================================================================
 with tabs[1]:
     st.subheader("📦 Katalog Produk Affiliate")
-    st.write("Katalog ini mampu menampung puluhan produk. Bot AI secara acak memilih produk berstatus **READY** setiap hari.")
+    st.write("Katalog ini menampung puluhan produk. Bot AI secara acak memilih produk berstatus **READY** setiap hari.")
 
     expected_cols = ["product_name", "highlight", "affiliate_link", "category", "status"]
 
