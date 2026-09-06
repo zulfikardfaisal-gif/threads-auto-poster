@@ -149,52 +149,82 @@ def update_config_keys(sh_obj, kv_pairs: dict):
         else:
             cfg_ws.append_row([k, str(v)])
 
-# --- DYNAMIC MODEL DISCOVERY GEMINI AI ---
-@st.cache_data(ttl=3600)
-def get_best_gemini_model():
-    if not AI_API_KEY:
-        return "gemini-1.5-flash-latest"
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={AI_API_KEY}"
-        res = requests.get(url, timeout=10).json()
-        if "models" in res:
-            supported = [
-                m["name"].replace("models/", "")
-                for m in res["models"]
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-            for target in ["gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]:
-                for s in supported:
-                    if target in s:
-                        return s
-            if supported:
-                return supported[0]
-    except Exception:
-        pass
-    return "gemini-1.5-flash-latest"
+# --- CALL GEMINI DENGAN DYNAMIC DISCOVERY (v1 & v1beta) ---
+def call_gemini_core(prompt: str) -> tuple:
+    key = AI_API_KEY.strip() if AI_API_KEY else ""
+    if not key:
+        raise Exception("API Key Gemini (AI_API_KEY) belum disetel di Secrets!")
 
-def call_gemini(prompt: str) -> str:
-    if not AI_API_KEY:
-        raise Exception("API Key Gemini (AI_API_KEY) belum disetel!")
+    available_pairs = []
+    errors = []
 
-    active_model = get_best_gemini_model()
-    candidate_models = [active_model, "gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"]
-    seen = set()
-    unique_candidates = [x for x in candidate_models if not (x in seen or seen.add(x))]
+    # 1. Cek ModelService.ListModels di versi v1 dan v1beta
+    for ver in ["v1", "v1beta"]:
+        list_url = f"https://generativelanguage.googleapis.com/{ver}/models?key={key}"
+        try:
+            r = requests.get(list_url, timeout=10)
+            res = r.json()
+            if "models" in res:
+                for m in res["models"]:
+                    if "generateContent" in m.get("supportedGenerationMethods", []):
+                        m_name = m["name"].replace("models/", "")
+                        available_pairs.append((ver, m_name))
+            elif "error" in res:
+                errors.append(f"{ver}: {res['error'].get('message', str(res['error']))}")
+        except Exception as e:
+            errors.append(f"{ver}: {str(e)}")
 
-    last_err = None
-    for model_name in unique_candidates:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={AI_API_KEY}"
+    # Urutkan model rekomendasi (utamakan flash stabil)
+    preferred = ["1.5-flash", "2.0-flash", "flash", "1.5-pro", "gemini-pro"]
+    def get_rank(pair):
+        v, n = pair
+        for idx, pref in enumerate(preferred):
+            if pref in n.lower():
+                return idx
+        return 99
+
+    available_pairs.sort(key=get_rank)
+
+    # 2. Coba jalankan model hasil discovery
+    if available_pairs:
+        for ver, m_name in available_pairs:
+            gen_url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            try:
+                r = requests.post(gen_url, json=payload, timeout=30)
+                res = r.json()
+                if "candidates" in res and res["candidates"]:
+                    return res["candidates"][0]["content"]["parts"][0]["text"].strip(), f"{ver}/{m_name}"
+            except Exception:
+                continue
+
+    # 3. Fallback direct endpoint (utamakan v1 yang sudah GA)
+    fallback_models = [
+        ("v1", "gemini-1.5-flash"),
+        ("v1", "gemini-1.5-pro"),
+        ("v1beta", "gemini-1.5-flash"),
+        ("v1beta", "gemini-2.0-flash"),
+        ("v1beta", "gemini-1.5-flash-latest"),
+    ]
+    for ver, m_name in fallback_models:
+        gen_url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         try:
-            res = requests.post(url, json=payload, timeout=30).json()
+            r = requests.post(gen_url, json=payload, timeout=30)
+            res = r.json()
             if "candidates" in res and res["candidates"]:
-                return res["candidates"][0]["content"]["parts"][0]["text"].strip()
-            last_err = res
+                return res["candidates"][0]["content"]["parts"][0]["text"].strip(), f"{ver}/{m_name}"
+            if "error" in res:
+                errors.append(f"{ver}/{m_name}: {res['error'].get('message', str(res))}")
         except Exception as e:
-            last_err = e
+            errors.append(f"{ver}/{m_name}: {str(e)}")
 
-    raise Exception(f"Gemini response error: {last_err}")
+    err_msg = " | ".join(errors[:2]) if errors else "Gagal menghubungi Gemini API."
+    raise Exception(err_msg)
+
+def call_gemini(prompt: str) -> str:
+    text, _ = call_gemini_core(prompt)
+    return text
 
 # Helper Tes Akun Threads
 def check_threads_token(user_id: str, access_token: str) -> dict:
@@ -962,21 +992,26 @@ with tabs[4]:
         st.write("##### 🤖 Tes Koneksi Google Gemini AI")
         st.caption("Uji coba respon model Gemini API dengan AI_API_KEY yang terpasang.")
         if st.button("⚡ Tes Respon Gemini AI"):
-            with st.spinner("Mengirim prompt ping ke Gemini API..."):
+            with st.spinner("Menguji koneksi ke Google Gemini API..."):
+                t_start = time_lib.time()
                 try:
-                    t_start = time_lib.time()
-                    ai_reply = call_gemini("Halo! Balas hanya dengan kalimat persis: 'Koneksi Gemini AI Aktif & Berhasil!'")
+                    ai_reply, model_used = call_gemini_core("Halo! Balas persis kalimat ini: 'Koneksi Gemini AI Aktif & Berhasil!'")
                     elapsed = round(time_lib.time() - t_start, 2)
-                    used_model = get_best_gemini_model()
                     st.success(
                         f"✅ **Gemini AI Terhubung Sempurna!**\n\n"
-                        f"- **Model Aktif:** `{used_model}`\n"
-                        f"- **Respon:** *'{ai_reply}'*\n"
+                        f"- **Model Aktif:** `{model_used}`\n"
+                        f"- **Respon:** *\"{ai_reply}\"*\n"
                         f"- **Latensi:** `{elapsed} detik`\n"
                         f"- **Status:** Siap Menulis Copywriting Otomatis"
                     )
                 except Exception as ex:
-                    st.error(f"❌ **Koneksi Gemini AI Gagal:** {ex}")
+                    key_preview = (str(AI_API_KEY)[:6] + "..." + str(AI_API_KEY)[-4:]) if AI_API_KEY else "Belum disetel"
+                    st.error(f"❌ **Koneksi Gemini AI Gagal:**\n\n`{ex}`")
+                    st.info(
+                        f"💡 **Info Diagnostik:**\n"
+                        f"- Key Terbaca: `{key_preview}`\n"
+                        f"- Pastikan API Key diambil dari **aistudio.google.com** (Google AI Studio)."
+                    )
 
     st.divider()
 
