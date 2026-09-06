@@ -114,7 +114,7 @@ def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
         slots.append(f"{curr_m // 60:02d}:{curr_m % 60:02d}")
     return slots
 
-# Helper penyusunan urutan konten
+# Helper urutan postingan
 def arrange_post_types(num_viral, num_affiliate):
     total = num_viral + num_affiliate
     if total == 0:
@@ -156,7 +156,7 @@ def get_length_prompt_desc(length_opt: str) -> str:
     else:
         return "Tulis dengan panjang sedang standar Threads (sekitar 180-250 karakter)."
 
-# Helper update tab Config
+# Helper update Config
 def update_config_keys(sh_obj, kv_pairs: dict):
     cfg_ws = sh_obj.worksheet("Config")
     all_vals = cfg_ws.get_all_values()
@@ -243,22 +243,54 @@ def call_gemini(prompt: str) -> str:
     text, _ = call_gemini_core(prompt)
     return text
 
-# Helper Generator Rantai Balasan (Link selalu di reply terakhir)
+# VARIATIF NARRATIVE POOL SEBELUM LINK AFFILIATE
+CLOSING_NARRATIVES = [
+    "Btw banyak yang nanya di DM, ini link toko resmi tempat aku beli ya mumpung masih promo:",
+    "Biar gak salah beli atau dapet yang zonk, aku taro link official store-nya di sini ya:",
+    "Yang mau samaan atau sekadar cek review pembeli lainnya, langsung kepoin di sini:",
+    "Spill link belinya di sini ya guys, kemarin pas aku cek lagi ada diskon lumayan:",
+    "Daripada ribet nyari tokonya satu-satu, langsung meluncur ke toko resminya di sini:",
+    "Kalo mau checkout mending sekarang sebelum kehabisan stok, link belinya di sini:",
+    "Kemarin dapet harga flash sale di toko ini dan pengirimannya cepet, linknya:",
+    "Biar dapet garansi resmi dan barang original, belinya lewat link ini ya:",
+    "Buat yang minta spill racunnya, ini link toko terpercaya yang sering aku pake:",
+    "Yang mau CO taro keranjang dulu aja, mumpung vouchernya masih aktif di sini:"
+]
+
+# Helper Generator Rantai Balasan (Link selalu di reply terakhir dengan narasi variatif)
 def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, reply_count: int) -> list:
     if reply_count <= 0 or not aff_link:
         return []
-    if reply_count == 1:
-        return [f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{aff_link}"]
 
+    # 1. Buat narasi variatif penutup sebelum link
+    try:
+        prompt_closing = (
+            f"Tulis 1 kalimat pengantar santai dan natural (maksimal 70 karakter) sebelum spill link toko pembelian '{prod_name}'. "
+            f"Contoh variasi tema: info official store, voucher diskon toko, atau alasan checkout mumpung ready. "
+            f"Tanpa hashtag, tanpa tanda kutip, dan JANGAN tulis link-nya."
+        )
+        closing_intro = call_gemini(prompt_closing).strip().strip('"').strip("'")
+        if not closing_intro or len(closing_intro) > 100:
+            closing_intro = random.choice(CLOSING_NARRATIVES)
+    except Exception:
+        closing_intro = random.choice(CLOSING_NARRATIVES)
+
+    final_reply = f"{closing_intro}\n{aff_link}"
+
+    # Jika hanya 1 reply
+    if reply_count == 1:
+        return [final_reply]
+
+    # Jika > 1 reply, buat balasan pengantar sebelum balasan penutup
     intermediate_count = reply_count - 1
-    prompt = (
+    prompt_intermediate = (
         f"Untuk postingan Threads tentang produk '{prod_name}' (Keunggulan: '{prod_hl}'). "
-        f"Tulis persis {intermediate_count} tweet balasan pendek lanjutan yang menyambung (sebelum link affiliate). "
-        f"Gaya santai, relate, jujur, mengalir. Pisahkan setiap balasan dengan tanda '---'. "
-        f"Maksimal 120 karakter per balasan. DILARANG pakai hashtag dan JANGAN sertakan link affiliate di sini."
+        f"Tulis persis {intermediate_count} tweet balasan pendek lanjutan yang menyambung secara bertahap (sebelum spill link). "
+        f"Gaya santai, relate, jujur seperti curhat pengalaman pakai. Pisahkan setiap balasan dengan tanda '---'. "
+        f"Maksimal 120 karakter per balasan. DILARANG pakai hashtag dan JANGAN sebutkan link."
     )
     try:
-        raw_res = call_gemini(prompt)
+        raw_res = call_gemini(prompt_intermediate)
         parts = [p.strip() for p in raw_res.split("---") if p.strip()]
         replies = parts[:intermediate_count]
         while len(replies) < intermediate_count:
@@ -266,8 +298,7 @@ def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, repl
     except Exception:
         replies = ["Jujur ini kepake banget buat kebutuhan sehari-hari." for _ in range(intermediate_count)]
 
-    # Balasan terakhir WAJIB berisi Link Affiliate
-    replies.append(f"Yang mau samaan atau cek racunnya, belinya di sini ya:\n{aff_link}")
+    replies.append(final_reply)
     return replies
 
 # Helper Tes Akun Threads
@@ -309,11 +340,11 @@ tabs = st.tabs([
 ])
 
 # ==============================================================================
-# TAB 1: KONTROL AUTOPILOT (JADWAL, PANJANG RANDOM & JUMLAH REPLY)
+# TAB 1: KONTROL AUTOPILOT
 # ==============================================================================
 with tabs[0]:
     st.subheader("Pengaturan Jadwal & Format Autopilot")
-    st.write("Atur tanggal aktif, porsi harian, **jumlah balasan rantai (link di akhir)**, dan **bobot acak panjang-pendek thread**.")
+    st.write("Atur tanggal aktif, porsi harian, **jumlah balasan rantai (link di akhir dengan narasi variatif)**, dan **bobot acak panjang-pendek thread**.")
 
     raw_start = cfg_data.get("start_datetime", "2026-09-06 08:00")
     raw_end = cfg_data.get("end_datetime", "2026-09-30 22:00")
@@ -358,13 +389,13 @@ with tabs[0]:
             f"- Jadwal: `{raw_start} WIB` s/d `{raw_end} WIB`\n"
             f"- Kuota Harian: **{total_daily} Konten** ({cur_viral_count} Viral + {cur_affiliate_count} Affiliate)\n"
             f"- Target Akun: `{cur_target_acc}`\n"
-            f"- Rantai Reply: **{cur_reply_count} Balasan** (Link Aff di reply #{cur_reply_count})\n"
+            f"- Rantai Reply: **{cur_reply_count} Balasan** (Link Aff di balasan terakhir)\n"
             f"- Pola Panjang AI: **{cur_length_bias}**"
         )
 
     st.divider()
 
-    st.write("#### 🛠️ Sesuaikan Jadwal, Target Akun & Jumlah Konten")
+    st.write("#### 🛠️ Sesuaikan Jadwal, Target Akun & Format Harian")
     
     acc_names_all = [str(a["name"]).strip() for a in acc_records if str(a.get("name", "")).strip()]
     auto_acc_options = ["-- Semua Akun (All Accounts) --"] + acc_names_all
@@ -403,7 +434,7 @@ with tabs[0]:
             def_end_time = time(22, 0)
         end_t = st.time_input("Jam Berakhir (End Time)", value=def_end_time)
 
-    # Form Porsi Konten & Format Baru
+    # Form Porsi Konten & Format
     st.write("##### 🎯 Porsi Konten, Format Rantai Reply & Pola Panjang Teks")
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -423,7 +454,6 @@ with tabs[0]:
             help="Postingan rekomendasi produk affiliate"
         )
 
-    # OPSI BARU AUTOPILOT: PANJANG RANDOM BERBOBOT & JUMLAH REPLY
     col_fmt1, col_fmt2 = st.columns(2)
     with col_fmt1:
         bias_options = [
@@ -445,7 +475,7 @@ with tabs[0]:
             min_value=1,
             max_value=5,
             value=cur_reply_count,
-            help="Jumlah balasan otomatis di bawah postingan utama. Link affiliate akan selalu ditaruh di balasan terakhir!"
+            help="Jumlah balasan otomatis di bawah postingan utama. Link affiliate akan selalu ditaruh di balasan terakhir disertai narasi variatif!"
         )
 
     total_plan = sel_viral + sel_affiliate
@@ -473,7 +503,7 @@ with tabs[0]:
                     "length_bias": str(sel_bias_autopilot)
                 })
                 st.cache_data.clear()
-                st.success("✅ Pengaturan autopilot (Reply Chain & Pola Panjang Teks) berhasil disimpan!")
+                st.success("✅ Pengaturan autopilot (Reply Chain & Narasi Variatif) berhasil disimpan!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Gagal menyimpan ke Google Sheets: {e}")
@@ -482,7 +512,7 @@ with tabs[0]:
 
     # Tombol Eksekusi Cepat
     st.write("#### ⚡ Eksekusi Cepat: Generate Konten Hari Ini")
-    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) dengan {sel_reply_count_ap} rantai balasan untuk {sel_auto_acc}.")
+    st.caption(f"Akan membuat {total_plan} postingan ({sel_viral} viral + {sel_affiliate} affiliate) dengan narasi link variatif untuk {sel_auto_acc}.")
 
     if st.button("🚀 Generate Konten Autopilot Sekarang"):
         sh_obj = get_spreadsheet()
@@ -523,7 +553,6 @@ with tabs[0]:
 
                                 aff_idx = 0
                                 for slot_time, p_type in zip(preview_slots, preview_types):
-                                    # Acak panjang postingan per konten sesuai bobot
                                     chosen_len = pick_length_by_bias(sel_bias_autopilot)
                                     len_desc = get_length_prompt_desc(chosen_len)
 
@@ -544,7 +573,7 @@ with tabs[0]:
                                         )
                                         main_txt = call_gemini(prompt_a)
                                         
-                                        # Buat balasan bertingkat dengan link di akhir
+                                        # Buat balasan bertingkat dengan narasi variatif dan link di akhir
                                         replies_chain = generate_affiliate_replies(
                                             prod['product_name'],
                                             prod.get('highlight', ''),
@@ -695,11 +724,11 @@ with tabs[1]:
                         st.rerun()
 
 # ==============================================================================
-# TAB 3: CONTENT STUDIO (LENGKAP: PILIHAN REPLY & PANJANG-PENDEK TEKS)
+# TAB 3: CONTENT STUDIO
 # ==============================================================================
 with tabs[2]:
     st.subheader("✍️ Content Studio (Pembuat Konten Manual & AI)")
-    st.caption("Atur target akun, waktu mulai, jumlah postingan, selang waktu (2 Jam s/d 1 Hari), panjang teks AI, dan jumlah rantai balasan.")
+    st.caption("Atur target akun, waktu mulai, jumlah postingan, selang waktu (2 Jam s/d 1 Hari), panjang teks AI, dan rantai balasan dengan link di akhir.")
 
     acc_names_all = [str(a["name"]).strip() for a in acc_records if str(a.get("name", "")).strip()]
     account_choices = ["-- Semua Akun (All Accounts) --"] + acc_names_all if acc_names_all else ["Belum ada akun"]
@@ -744,7 +773,7 @@ with tabs[2]:
             min_value=1,
             max_value=5,
             value=1,
-            help="Jumlah balasan otomatis di bawah postingan utama. Link affiliate akan selalu ditaruh di balasan terakhir!"
+            help="Jumlah balasan otomatis di bawah postingan utama. Link affiliate akan selalu ditaruh di balasan terakhir disertai narasi variatif!"
         )
 
     st.divider()
@@ -906,7 +935,7 @@ with tabs[2]:
                         )
                         main_t = call_gemini(prompt)
 
-                        # Generate rantai balasan dengan link di balasan terakhir
+                        # Generate rantai balasan dengan narasi variatif dan link di akhir
                         replies_chain = generate_affiliate_replies(p_name, p_hl, p_link, manual_reply_count)
                         joined_replies = "\n---REPLY---\n".join(replies_chain)
 
