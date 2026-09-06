@@ -67,6 +67,29 @@ def get_length_prompt_desc(length_opt: str) -> str:
     else:
         return "Tulis dengan panjang sedang standar Threads (sekitar 180-250 karakter)."
 
+def resolve_reply_count(reply_mode: str) -> int:
+    if "1 - 3" in reply_mode:
+        return random.randint(1, 3)
+    elif "1 - 5" in reply_mode:
+        return random.randint(1, 5)
+    elif "2 - 4" in reply_mode:
+        return random.randint(2, 4)
+    m = re.search(r"\d+", str(reply_mode))
+    if m:
+        return max(1, int(m.group()))
+    return 1
+
+def resolve_style_desc(style_opt: str) -> str:
+    if "Serahkan ke AI" in style_opt:
+        pool = [
+            "Curhat Santai & Relate (Bahasa Threads anak muda)",
+            "Storytelling Pengalaman Pribadi (Masalah -> Solusi)",
+            "Review Jujur & Solutif (Highlight keunggulan produk)",
+            "Racun Belanja Shopee (Antusias & bikin pengen checkout)"
+        ]
+        return f"Gaya bahasa: {random.choice(pool)}"
+    return f"Gaya bahasa: {style_opt}"
+
 def generate_slots(total_count, start_time_str="08:15", end_time_str="21:30"):
     if total_count <= 0:
         return []
@@ -103,10 +126,16 @@ def arrange_post_types(num_viral, num_affiliate):
         curr += 1
     return ["viral" if i in viral_indices else "affiliate" for i in range(total)]
 
+# Pembacaan tab Config secara aman (mengabaikan kolom ke-3)
 def is_active_window(sh) -> tuple:
     try:
         cfg_ws = sh.worksheet("Config")
-        raw_cfg = dict(cfg_ws.get_all_values())
+        cfg_rows = cfg_ws.get_all_values()
+        raw_cfg = {}
+        for r in cfg_rows:
+            if len(r) >= 2 and r[0].strip():
+                raw_cfg[r[0].strip()] = r[1].strip()
+
         start_str = raw_cfg.get("start_datetime", "").strip()
         end_str = raw_cfg.get("end_datetime", "").strip()
 
@@ -121,16 +150,12 @@ def is_active_window(sh) -> tuple:
             num_affiliate = 4
 
         target_acc = raw_cfg.get("target_autopilot_account", "-- Semua Akun (All Accounts) --").strip()
-        
-        try:
-            reply_count = int(raw_cfg.get("reply_count", 1))
-        except:
-            reply_count = 1
-
+        reply_mode = str(raw_cfg.get("reply_mode", "🎲 Acak (1 - 3 Balasan)")).strip()
         length_bias = str(raw_cfg.get("length_bias", "Dominan Sedang (Lebih banyak standar)")).strip()
+        ai_style = str(raw_cfg.get("ai_style", "Serahkan ke AI (Smart Adaptive / Acak Tiap Post)")).strip()
 
         if not start_str or not end_str:
-            return True, num_viral, num_affiliate, target_acc, reply_count, length_bias
+            return True, num_viral, num_affiliate, target_acc, reply_mode, length_bias, ai_style
 
         now = datetime.now(TZ)
         start_dt = parse_flexible_dt(start_str)
@@ -138,12 +163,12 @@ def is_active_window(sh) -> tuple:
 
         if not (start_dt <= now <= end_dt):
             logger.info(f"Di luar rentang aktif ({start_str} s/d {end_str}). Generator dihentikan.")
-            return False, num_viral, num_affiliate, target_acc, reply_count, length_bias
+            return False, num_viral, num_affiliate, target_acc, reply_mode, length_bias, ai_style
 
-        return True, num_viral, num_affiliate, target_acc, reply_count, length_bias
+        return True, num_viral, num_affiliate, target_acc, reply_mode, length_bias, ai_style
     except Exception as e:
         logger.warning(f"Gagal membaca tab Config: {e}. Menggunakan default.")
-        return True, 1, 4, "-- Semua Akun (All Accounts) --", 1, "Dominan Sedang"
+        return True, 1, 4, "-- Semua Akun (All Accounts) --", "🎲 Acak (1 - 3 Balasan)", "Dominan Sedang", "Serahkan ke AI"
 
 def get_sheets_client():
     creds_json = base64.b64decode(GCP_CREDS_BASE64).decode("utf-8")
@@ -153,8 +178,55 @@ def get_sheets_client():
     )
     return gspread.authorize(creds)
 
+# Call Gemini dengan Dynamic Model Discovery resmi
 def call_gemini(prompt: str) -> str:
-    key = AI_API_KEY.strip() if AI_API_KEY else ""
+    key = str(AI_API_KEY).strip().replace("'", "").replace('"', "") if AI_API_KEY else ""
+    if not key:
+        raise Exception("API Key Gemini (AI_API_KEY) belum disetel di GitHub Secrets!")
+
+    available_pairs = []
+    errors = []
+
+    # 1. Tanya Google model apa yang aktif untuk key ini
+    for ver in ["v1", "v1beta"]:
+        list_url = f"https://generativelanguage.googleapis.com/{ver}/models?key={key}"
+        try:
+            r = requests.get(list_url, timeout=10)
+            res = r.json()
+            if "models" in res:
+                for m in res["models"]:
+                    if "generateContent" in m.get("supportedGenerationMethods", []):
+                        m_name = m["name"].replace("models/", "")
+                        available_pairs.append((ver, m_name))
+            elif "error" in res:
+                errors.append(f"{ver}: {res['error'].get('message', str(res['error']))}")
+        except Exception as e:
+            errors.append(f"{ver}: {str(e)}")
+
+    preferred = ["1.5-flash", "2.0-flash", "flash", "1.5-pro", "gemini-pro"]
+    def get_rank(pair):
+        v, n = pair
+        for idx, pref in enumerate(preferred):
+            if pref in n.lower():
+                return idx
+        return 99
+
+    available_pairs.sort(key=get_rank)
+
+    # 2. Coba model yang ditemukan
+    if available_pairs:
+        for ver, m_name in available_pairs:
+            gen_url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            try:
+                r = requests.post(gen_url, json=payload, timeout=30)
+                res = r.json()
+                if "candidates" in res and res["candidates"]:
+                    return res["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                continue
+
+    # 3. Fallback direct endpoint
     fallback_models = [
         ("v1", "gemini-1.5-flash"),
         ("v1", "gemini-1.5-pro"),
@@ -162,18 +234,20 @@ def call_gemini(prompt: str) -> str:
         ("v1beta", "gemini-2.0-flash"),
         ("v1beta", "gemini-1.5-flash-latest"),
     ]
-    last_err = None
     for ver, m_name in fallback_models:
-        url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
+        gen_url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         try:
-            res = requests.post(url, json=payload, timeout=30).json()
+            res = requests.post(gen_url, json=payload, timeout=30).json()
             if "candidates" in res and res["candidates"]:
                 return res["candidates"][0]["content"]["parts"][0]["text"].strip()
-            last_err = res
+            if "error" in res:
+                errors.append(f"{ver}/{m_name}: {res['error'].get('message', str(res))}")
         except Exception as e:
-            last_err = e
-    raise Exception(f"Gemini API error: {last_err}")
+            errors.append(f"{ver}/{m_name}: {str(e)}")
+
+    err_msg = " | ".join(errors[:2]) if errors else "Gagal menghubungi Gemini API."
+    raise Exception(f"Gemini API error: {err_msg}")
 
 def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, reply_count: int) -> list:
     if reply_count <= 0 or not aff_link:
@@ -217,13 +291,13 @@ def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, repl
 
 def main():
     if not SPREADSHEET_ID or not GCP_CREDS_BASE64 or not AI_API_KEY:
-        logger.error("Kredensial SPREADSHEET_ID, GCP_CREDS_BASE64, atau AI_API_KEY belum disetel.")
+        logger.error("Kredensial SPREADSHEET_ID, GCP_CREDS_BASE64, atau AI_API_KEY belum disetel di GitHub Secrets.")
         return
 
     client = get_sheets_client()
     sh = client.open_by_key(SPREADSHEET_ID)
 
-    active, num_viral, num_affiliate, target_config_acc, reply_count, length_bias = is_active_window(sh)
+    active, num_viral, num_affiliate, target_config_acc, reply_mode, length_bias, ai_style = is_active_window(sh)
     if not active:
         return
 
@@ -264,12 +338,13 @@ def main():
         for slot_time, p_type in zip(slots, types):
             chosen_len = pick_length_by_bias(length_bias)
             len_desc = get_length_prompt_desc(chosen_len)
+            style_desc = resolve_style_desc(ai_style)
 
             if p_type == "viral":
                 viral_topic = random.choice(VIRAL_PROMPTS)
                 prompt_v = (
                     f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: '{viral_topic}'. "
-                    f"{len_desc} Tanpa hashtag, tanpa tanda kutip."
+                    f"{style_desc}. {len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
                 )
                 v_text = call_gemini(prompt_v)
                 new_entries.append([today_str, slot_time, acc_name, v_text, "", "", "", "PENDING", "", "", ""])
@@ -278,25 +353,27 @@ def main():
                 aff_counter += 1
                 prompt_aff = (
                     f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk barang: '{prod['product_name']}' "
-                    f"(Keunggulan: {prod.get('highlight', '')}). {len_desc} Tanpa hashtag dan tanda kutip."
+                    f"(Keunggulan: {prod.get('highlight', '')}). {style_desc}. {len_desc} Tanpa hashtag dan tanda kutip."
                 )
                 main_aff = call_gemini(prompt_aff)
                 
-                # Buat balasan bertingkat dengan narasi variatif dan link di akhir
+                # Resolusi reply count acak per postingan
+                act_rep_count = resolve_reply_count(reply_mode)
                 replies_chain = generate_affiliate_replies(
                     prod['product_name'],
                     prod.get('highlight', ''),
                     prod['affiliate_link'],
-                    reply_count
+                    act_rep_count
                 )
                 joined_replies = "\n---REPLY---\n".join(replies_chain)
 
-                new_entries.append([today_str, slot_time, acc_name, main_aff, "", joined_replies, prod["affiliate_link"], "PENDING", "", "", ""])
+                new_rows = [today_str, slot_time, acc_name, main_aff, "", joined_replies, prod["affiliate_link"], "PENDING", "", "", ""]
+                new_entries.append(new_rows)
 
     for entry in new_entries:
         data_ws.append_row(entry)
 
-    logger.info(f"Berhasil menambahkan {len(new_entries)} konten autopilot (Rantai reply={reply_count}, Pola={length_bias}).")
+    logger.info(f"Berhasil menambahkan {len(new_entries)} konten autopilot (Style={ai_style}, Reply={reply_mode}).")
 
 if __name__ == "__main__":
     main()
