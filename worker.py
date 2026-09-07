@@ -44,7 +44,7 @@ def is_active_window(sh) -> bool:
         start_dt = parse_flexible_dt(start_str)
         end_dt = parse_flexible_dt(end_str)
 
-        # Cek rentang tanggal aktif
+        # Validasi tanggal aktif hari ini
         if not (start_dt.date() <= now.date() <= end_dt.date()):
             logger.info(f"Hari ini ({now.date()}) di luar rentang aktif ({start_dt.date()} s/d {end_dt.date()}). Worker dihentikan.")
             return False
@@ -77,6 +77,9 @@ def post_to_threads(user_id: str, access_token: str, text: str, reply_to: str = 
         raise Exception(f"Gagal membuat container Threads: {res}")
 
     creation_id = res["id"]
+
+    # Jeda 2 detik sebelum mempublikasikan container
+    time.sleep(2)
 
     url_publish = f"https://graph.threads.net/v1.0/{user_id}/threads_publish"
     pub_res = requests.post(
@@ -119,7 +122,7 @@ def main():
         if len(s_time) == 4 and s_time[1] == ":":
             s_time = "0" + s_time
 
-        # Eksekusi jika PENDING dan jadwalnya sudah tiba
+        # Eksekusi antrean yang PENDING dan jadwalnya sudah masuk
         if status == "PENDING" and s_date <= today_str and s_time <= now_time_str:
             acc_name = str(row.get("target_accounts", "")).strip()
             acc = accounts.get(acc_name)
@@ -134,25 +137,26 @@ def main():
             try:
                 # 1. Posting Postingan Utama
                 main_id = post_to_threads(user_id, token, str(row["main_text"]))
-                logger.info(f"Postingan utama terbit: {main_id}")
+                logger.info(f"Postingan utama berhasil terbit: {main_id}")
 
-                # 2. Posting Rantai Balasan Bertingkat (Thread Bersambung)
+                # 2. Posting Rantai Balasan Bertingkat (Utas / Thread)
                 reply_raw = str(row.get("reply_text", "")).strip()
                 if reply_raw:
-                    # Pecah teks berdasarkan delimiter ---REPLY---
-                    reply_parts = [r.strip() for r in reply_raw.split("---REPLY---") if r.strip()]
+                    # Memecah teks menggunakan Regex agar kebal dari spasi/baris baru di sekitar pemisah REPLY
+                    reply_parts = [p.strip() for p in re.split(r"-{3,}\s*REPLY\s*-{3,}", reply_raw, flags=re.IGNORECASE) if p.strip()]
+                    
                     parent_id = main_id
-
                     for r_idx, part in enumerate(reply_parts, start=1):
-                        time.sleep(3)  # Beri jeda 3 detik agar urutan rantai di Threads tidak terbalik
+                        time.sleep(4)  # Jeda 4 detik agar urutan rantai tidak tertukar di server Threads
                         parent_id = post_to_threads(user_id, token, part, reply_to=parent_id)
-                        logger.info(f"Reply {r_idx}/{len(reply_parts)} terbit: {parent_id}")
+                        logger.info(f"Balasan {r_idx}/{len(reply_parts)} berhasil terbit: {parent_id}")
 
-                # Update status spreadsheet
+                # Update status baris di Google Sheets
                 data_ws.update_cell(idx, 8, "POSTED")
                 data_ws.update_cell(idx, 9, datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"))
                 data_ws.update_cell(idx, 10, main_id)
                 data_ws.update_cell(idx, 11, "")
+                logger.info(f"Baris {idx} sukses diposting.")
                 break
 
             except Exception as e:
