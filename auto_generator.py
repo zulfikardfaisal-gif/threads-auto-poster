@@ -18,12 +18,24 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 GCP_CREDS_BASE64 = os.environ.get("GCP_CREDS_BASE64")
 AI_API_KEY = os.environ.get("AI_API_KEY")
 
-VIRAL_PROMPTS = [
+# --- POOL HOOK VIRAL THREADS (Dirotasi otomatis agar tidak monoton) ---
+VIRAL_HOOK_PATTERNS = [
+    "Pola 'Skeptis ke Plot Twist': Awali dengan mengira barang ini awalnya cuma gimik marketing atau gak penting, tapi pas dipakai ternyata ngebantu banget.",
+    "Pola 'Underrated Discovery': Awali dengan rasa heran atau penasaran kenapa barang ini baru disadari fungsinya sekarang padahal praktis banget.",
+    "Pola 'Daily Frustration': Awali dengan masalah sepele harian yang sering bikin repot sebelum nemu solusi simpel ini.",
+    "Pola 'Investasi Kecil Faedah Gede': Awali dengan nada rekomendasi bahwa dengan harga terjangkau manfaatnya berasa banget buat jangka panjang.",
+    "Pola 'Statement Tegas Singkat': Awali dengan 1 kalimat pendek to-the-point yang bikin orang penasaran membaca lanjutannya.",
+    "Pola 'Curhat Solutif': Awali dengan pengalaman setelah sering salah beli atau gonta-ganti barang, akhirnya nemu yang beneran awet.",
+    "Pola 'Spill Santai': Awali seperti lagi spill rahasia printilan berguna ke teman tongkrongan."
+]
+
+VIRAL_TOPICS = [
     "Dilema dunia kerja, lembur, dan overthinking karir usia 20-an",
     "Perdebatan belanja impulsif vs hemat yang selalu berakhir boncos",
     "Curhat realita tinggal di kota besar dan susahnya menabung",
     "Humor linimasa soal tanggal tua dan godaan checkout marketplace",
-    "Pilihan hidup karir stabil vs bangun bisnis sendiri yang serba spekulatif"
+    "Pilihan hidup karir stabil vs bangun bisnis sendiri yang serba spekulatif",
+    "Gaya hidup FOMO vs ketenangan hidup sederhana yang hemat"
 ]
 
 CLOSING_NARRATIVES = [
@@ -126,7 +138,7 @@ def arrange_post_types(num_viral, num_affiliate):
         curr += 1
     return ["viral" if i in viral_indices else "affiliate" for i in range(total)]
 
-# Pembacaan tab Config secara aman (mengabaikan kolom ke-3)
+# Pembacaan tab Config secara aman (kebal jika ada 3 kolom) & pengecekan tanggal
 def is_active_window(sh) -> tuple:
     try:
         cfg_ws = sh.worksheet("Config")
@@ -161,8 +173,9 @@ def is_active_window(sh) -> tuple:
         start_dt = parse_flexible_dt(start_str)
         end_dt = parse_flexible_dt(end_str)
 
-        if not (start_dt <= now <= end_dt):
-            logger.info(f"Di luar rentang aktif ({start_str} s/d {end_str}). Generator dihentikan.")
+        today_date = now.date()
+        if not (start_dt.date() <= today_date <= end_dt.date()):
+            logger.info(f"Hari ini ({today_date}) di luar rentang aktif ({start_dt.date()} s/d {end_dt.date()}). Generator dihentikan.")
             return False, num_viral, num_affiliate, target_acc, reply_mode, length_bias, ai_style
 
         return True, num_viral, num_affiliate, target_acc, reply_mode, length_bias, ai_style
@@ -178,7 +191,7 @@ def get_sheets_client():
     )
     return gspread.authorize(creds)
 
-# Call Gemini dengan Dynamic Model Discovery resmi
+# Call Gemini dengan Dynamic Model Discovery
 def call_gemini(prompt: str) -> str:
     key = str(AI_API_KEY).strip().replace("'", "").replace('"', "") if AI_API_KEY else ""
     if not key:
@@ -187,7 +200,6 @@ def call_gemini(prompt: str) -> str:
     available_pairs = []
     errors = []
 
-    # 1. Tanya Google model apa yang aktif untuk key ini
     for ver in ["v1", "v1beta"]:
         list_url = f"https://generativelanguage.googleapis.com/{ver}/models?key={key}"
         try:
@@ -213,7 +225,6 @@ def call_gemini(prompt: str) -> str:
 
     available_pairs.sort(key=get_rank)
 
-    # 2. Coba model yang ditemukan
     if available_pairs:
         for ver, m_name in available_pairs:
             gen_url = f"https://generativelanguage.googleapis.com/{ver}/models/{m_name}:generateContent?key={key}"
@@ -226,7 +237,6 @@ def call_gemini(prompt: str) -> str:
             except Exception:
                 continue
 
-    # 3. Fallback direct endpoint
     fallback_models = [
         ("v1", "gemini-1.5-flash"),
         ("v1", "gemini-1.5-pro"),
@@ -249,6 +259,7 @@ def call_gemini(prompt: str) -> str:
     err_msg = " | ".join(errors[:2]) if errors else "Gagal menghubungi Gemini API."
     raise Exception(f"Gemini API error: {err_msg}")
 
+# Rantai balasan dengan narasi variatif dan link di balasan terakhir
 def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, reply_count: int) -> list:
     if reply_count <= 0 or not aff_link:
         return []
@@ -256,7 +267,7 @@ def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, repl
     try:
         prompt_closing = (
             f"Tulis 1 kalimat pengantar santai dan natural (maksimal 70 karakter) sebelum spill link toko pembelian '{prod_name}'. "
-            f"Contoh variasi tema: info official store, voucher diskon toko, atau alasan checkout mumpung ready. "
+            f"Contoh tema: info official store, voucher diskon toko, atau alasan checkout mumpung ready. "
             f"Tanpa hashtag, tanpa tanda kutip, dan JANGAN tulis link-nya."
         )
         closing_intro = call_gemini(prompt_closing).strip().strip('"').strip("'")
@@ -284,7 +295,7 @@ def generate_affiliate_replies(prod_name: str, prod_hl: str, aff_link: str, repl
         while len(replies) < intermediate_count:
             replies.append("Worth it banget sih ini buat pemakaian jangka panjang.")
     except Exception:
-        replies = ["Jujur ini kepake banget buat kebutuhan sehari-hari." for _ in range(intermediate_count)]
+        replies = ["Barang ini praktis banget buat kebutuhan sehari-hari." for _ in range(intermediate_count)]
 
     replies.append(final_reply)
     return replies
@@ -341,9 +352,9 @@ def main():
             style_desc = resolve_style_desc(ai_style)
 
             if p_type == "viral":
-                viral_topic = random.choice(VIRAL_PROMPTS)
+                viral_topic = random.choice(VIRAL_TOPICS)
                 prompt_v = (
-                    f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar tentang: '{viral_topic}'. "
+                    f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar warganet tentang: '{viral_topic}'. "
                     f"{style_desc}. {len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
                 )
                 v_text = call_gemini(prompt_v)
@@ -351,13 +362,21 @@ def main():
             else:
                 prod = sampled[aff_counter]
                 aff_counter += 1
+
+                # Mengundi salah satu dari 7 pola hook viral Threads
+                chosen_hook = random.choice(VIRAL_HOOK_PATTERNS)
+
                 prompt_aff = (
-                    f"Tulis hook teks Threads bahasa Indonesia santai gaya curhat tanpa hard-selling untuk barang: '{prod['product_name']}' "
-                    f"(Keunggulan: {prod.get('highlight', '')}). {style_desc}. {len_desc} Tanpa hashtag dan tanda kutip."
+                    f"Tulis 1 postingan Threads bahasa Indonesia yang sangat natural, tidak kaku, dan memancing engagement untuk barang: '{prod['product_name']}' "
+                    f"(Keunggulan utama: {prod.get('highlight', '')}).\n"
+                    f"- Format Pembuka: {chosen_hook}.\n"
+                    f"- {style_desc}.\n"
+                    f"- {len_desc}.\n"
+                    f"- ATURAN PENTING: Jangan monoton. Buat kalimat pembuka mengalir alami. DILARANG pakai hashtag dan tanda kutip."
                 )
                 main_aff = call_gemini(prompt_aff)
                 
-                # Resolusi reply count acak per postingan
+                # Resolusi rantai balasan (bisa acak 1-3 reply, link selalu di akhir)
                 act_rep_count = resolve_reply_count(reply_mode)
                 replies_chain = generate_affiliate_replies(
                     prod['product_name'],
