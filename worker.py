@@ -44,7 +44,6 @@ def is_active_window(sh) -> bool:
         start_dt = parse_flexible_dt(start_str)
         end_dt = parse_flexible_dt(end_str)
 
-        # Validasi tanggal aktif hari ini
         if not (start_dt.date() <= now.date() <= end_dt.date()):
             logger.info(f"Hari ini ({now.date()}) di luar rentang aktif ({start_dt.date()} s/d {end_dt.date()}). Worker dihentikan.")
             return False
@@ -62,11 +61,21 @@ def get_sheets_client():
     )
     return gspread.authorize(creds)
 
+def safe_trim(text: str, limit: int = 490) -> str:
+    """Memotong teks otomatis agar tidak tembus limit 500 karakter Meta API."""
+    text = str(text).strip()
+    if len(text) <= limit:
+        return text
+    trimmed = text[:limit].rsplit(" ", 1)[0]
+    return trimmed.strip() + "..."
+
 def post_to_threads(user_id: str, access_token: str, text: str, reply_to: str = None) -> str:
     url_container = f"https://graph.threads.net/v1.0/{user_id}/threads"
+    clean_text = safe_trim(text, limit=490)
+
     payload = {
         "media_type": "TEXT",
-        "text": text,
+        "text": clean_text,
         "access_token": access_token
     }
     if reply_to:
@@ -77,8 +86,6 @@ def post_to_threads(user_id: str, access_token: str, text: str, reply_to: str = 
         raise Exception(f"Gagal membuat container Threads: {res}")
 
     creation_id = res["id"]
-
-    # Jeda 2 detik sebelum mempublikasikan container
     time.sleep(2)
 
     url_publish = f"https://graph.threads.net/v1.0/{user_id}/threads_publish"
@@ -122,7 +129,6 @@ def main():
         if len(s_time) == 4 and s_time[1] == ":":
             s_time = "0" + s_time
 
-        # Eksekusi antrean yang PENDING dan jadwalnya sudah masuk
         if status == "PENDING" and s_date <= today_str and s_time <= now_time_str:
             acc_name = str(row.get("target_accounts", "")).strip()
             acc = accounts.get(acc_name)
@@ -135,23 +141,22 @@ def main():
             token = str(acc["access_token"]).strip()
 
             try:
-                # 1. Posting Postingan Utama
+                # 1. Posting Postingan Utama (Auto-Trim)
                 main_id = post_to_threads(user_id, token, str(row["main_text"]))
-                logger.info(f"Postingan utama berhasil terbit: {main_id}")
+                logger.info(f"Postingan utama terbit: {main_id}")
 
-                # 2. Posting Rantai Balasan Bertingkat (Utas / Thread)
+                # 2. Posting Rantai Balasan Bertingkat (Auto-Trim per balasan)
                 reply_raw = str(row.get("reply_text", "")).strip()
                 if reply_raw:
-                    # Memecah teks menggunakan Regex agar kebal dari spasi/baris baru di sekitar pemisah REPLY
                     reply_parts = [p.strip() for p in re.split(r"-{3,}\s*REPLY\s*-{3,}", reply_raw, flags=re.IGNORECASE) if p.strip()]
-                    
                     parent_id = main_id
-                    for r_idx, part in enumerate(reply_parts, start=1):
-                        time.sleep(4)  # Jeda 4 detik agar urutan rantai tidak tertukar di server Threads
-                        parent_id = post_to_threads(user_id, token, part, reply_to=parent_id)
-                        logger.info(f"Balasan {r_idx}/{len(reply_parts)} berhasil terbit: {parent_id}")
 
-                # Update status baris di Google Sheets
+                    for r_idx, part in enumerate(reply_parts, start=1):
+                        time.sleep(4)
+                        parent_id = post_to_threads(user_id, token, part, reply_to=parent_id)
+                        logger.info(f"Balasan {r_idx}/{len(reply_parts)} terbit: {parent_id}")
+
+                # Update Status Sukses ke Spreadsheet
                 data_ws.update_cell(idx, 8, "POSTED")
                 data_ws.update_cell(idx, 9, datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"))
                 data_ws.update_cell(idx, 10, main_id)
