@@ -61,9 +61,11 @@ def get_sheets_client():
     )
     return gspread.authorize(creds)
 
-def safe_trim(text: str, limit: int = 490) -> str:
-    """Memotong teks otomatis agar tidak tembus limit 500 karakter Meta API."""
+def safe_trim(text: str, limit: int = 480) -> str:
+    """Memotong teks otomatis dan membersihkan sisa delimiter."""
     text = str(text).strip()
+    # Hapus sisa teks pemisah jika masih terselip
+    text = re.sub(r"-{2,}\s*REPLY\s*-{2,}", "", text, flags=re.IGNORECASE).strip()
     if len(text) <= limit:
         return text
     trimmed = text[:limit].rsplit(" ", 1)[0]
@@ -71,7 +73,7 @@ def safe_trim(text: str, limit: int = 490) -> str:
 
 def post_to_threads(user_id: str, access_token: str, text: str, reply_to: str = None) -> str:
     url_container = f"https://graph.threads.net/v1.0/{user_id}/threads"
-    clean_text = safe_trim(text, limit=490)
+    clean_text = safe_trim(text, limit=480)
 
     payload = {
         "media_type": "TEXT",
@@ -86,7 +88,7 @@ def post_to_threads(user_id: str, access_token: str, text: str, reply_to: str = 
         raise Exception(f"Gagal membuat container Threads: {res}")
 
     creation_id = res["id"]
-    time.sleep(2)
+    time.sleep(3)
 
     url_publish = f"https://graph.threads.net/v1.0/{user_id}/threads_publish"
     pub_res = requests.post(
@@ -141,22 +143,27 @@ def main():
             token = str(acc["access_token"]).strip()
 
             try:
-                # 1. Posting Postingan Utama (Auto-Trim)
+                # 1. Posting Konten Utama
                 main_id = post_to_threads(user_id, token, str(row["main_text"]))
                 logger.info(f"Postingan utama terbit: {main_id}")
 
-                # 2. Posting Rantai Balasan Bertingkat (Auto-Trim per balasan)
+                # 2. Posting Rantai Balasan Bertingkat (Utas / Thread)
                 reply_raw = str(row.get("reply_text", "")).strip()
                 if reply_raw:
-                    reply_parts = [p.strip() for p in re.split(r"-{3,}\s*REPLY\s*-{3,}", reply_raw, flags=re.IGNORECASE) if p.strip()]
+                    # Pecah teks menggunakan regex kebal format
+                    reply_parts = [p.strip() for p in re.split(r"-{2,}\s*REPLY\s*-{2,}", reply_raw, flags=re.IGNORECASE) if p.strip()]
                     parent_id = main_id
 
                     for r_idx, part in enumerate(reply_parts, start=1):
-                        time.sleep(4)
-                        parent_id = post_to_threads(user_id, token, part, reply_to=parent_id)
+                        time.sleep(5)  # Jeda lima detik agar server Meta selesai mengindeks balasan sebelumnya
+                        try:
+                            parent_id = post_to_threads(user_id, token, part, reply_to=parent_id)
+                        except Exception:
+                            # Fallback: jika sambungan bertingkat gagal, balas langsung ke postingan utama
+                            parent_id = post_to_threads(user_id, token, part, reply_to=main_id)
                         logger.info(f"Balasan {r_idx}/{len(reply_parts)} terbit: {parent_id}")
 
-                # Update Status Sukses ke Spreadsheet
+                # Tandai selesai di Google Sheets
                 data_ws.update_cell(idx, 8, "POSTED")
                 data_ws.update_cell(idx, 9, datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"))
                 data_ws.update_cell(idx, 10, main_id)
