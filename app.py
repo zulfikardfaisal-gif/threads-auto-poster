@@ -1,13 +1,12 @@
 import os
 import json
 import base64
-import random
 from datetime import datetime, timedelta
 import pytz
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from google import genai
+import google.generativeai as genai
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
@@ -41,13 +40,23 @@ def get_sheets_client():
     return gspread.authorize(creds)
 
 @st.cache_resource
-def get_ai_client():
+def get_ai_model():
     if not AI_API_KEY:
         st.error("AI_API_KEY belum disetel di Secrets.")
         st.stop()
-    return genai.Client(api_key=AI_API_KEY)
+    genai.configure(api_key=AI_API_KEY)
+    
+    # Deteksi model otomatis yang tersedia
+    try:
+        available = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
+        for pref in ["models/gemini-1.5-flash", "models/gemini-2.0-flash", "models/gemini-1.5-pro"]:
+            if pref in available:
+                return genai.GenerativeModel(pref)
+        return genai.GenerativeModel(available[0])
+    except Exception:
+        return genai.GenerativeModel("gemini-1.5-flash")
 
-# --- FUNGSI DATABASE SHEETS ---
+# --- DATABASE SHEETS ---
 def load_sheet_data(worksheet_name: str):
     gc = get_sheets_client()
     sh = gc.open_by_key(SPREADSHEET_ID)
@@ -55,23 +64,20 @@ def load_sheet_data(worksheet_name: str):
     return ws, ws.get_all_records()
 
 # --- FUNGSI GENERATOR AI ---
-def generate_viral_post(ai_client) -> str:
+def generate_viral_post(model) -> str:
     prompt = """
     Tulis 1 postingan Threads gaya Indonesia santai/relatable.
     Topik seputar: realita dunia kerja, kebiasaan begadang, overthinking receh, atau kebiasaan boros anak muda.
     Aturan:
     - Tanpa emoji berlebihan.
     - Maksimal 280 karakter.
-    - Nada bicara seperti teman tongkrongan (bukan robot formal).
+    - Nada bicara seperti teman tongkrongan.
     - HANYA kembalikan teks postingan.
     """
-    res = ai_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
+    res = model.generate_content(prompt)
     return res.text.strip().replace('"', '')
 
-def generate_affiliate_post(ai_client, prod_name: str, highlight: str, aff_link: str, tone: str) -> tuple[str, str]:
+def generate_affiliate_post(model, prod_name: str, highlight: str, aff_link: str, tone: str) -> tuple[str, str]:
     prompt = f"""
     Produk: {prod_name}
     Keunggulan: {highlight}
@@ -86,19 +92,16 @@ def generate_affiliate_post(ai_client, prod_name: str, highlight: str, aff_link:
     [Teks Balasan / Reply Berisi Link]
 
     Aturan Postingan Utama:
-    - Awali dengan hook santai atau keluhan relatable yang dialami audiens.
+    - Awali dengan hook santai atau keluhan relatable.
     - Maksimal 300 karakter.
     - Jangan cantumkan link di postingan utama.
 
     Aturan Teks Balasan:
-    - Ulasan ringkas jujur kenapa barang ini bermanfaat.
+    - Ulasan ringkas kenapa barang ini berguna.
     - Cantumkan link pembelian persis: {aff_link}
     - Maksimal 250 karakter.
     """
-    res = ai_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
+    res = model.generate_content(prompt)
     parts = res.text.split("KODE_SPLIT")
     if len(parts) >= 2:
         return parts[0].strip().replace('"', ''), parts[1].strip().replace('"', '')
@@ -146,17 +149,17 @@ with tab_studio:
 
     with col_b:
         st.write("**Pratinjau & Generate:**")
-        ai_client = get_ai_client()
+        ai_model = get_ai_model()
 
         if st.button("✨ Generate Teks Konten via AI", use_container_width=True):
             if mode == "Viral Booster (Tanpa Link)":
-                st.session_state["gen_main"] = generate_viral_post(ai_client)
+                st.session_state["gen_main"] = generate_viral_post(ai_model)
                 st.session_state["gen_reply"] = ""
                 st.session_state["gen_media"] = ""
             else:
                 if selected_prod:
                     m_txt, r_txt = generate_affiliate_post(
-                        ai_client,
+                        ai_model,
                         selected_prod["product_name"],
                         selected_prod.get("highlight", ""),
                         selected_prod.get("affiliate_link", ""),
@@ -183,19 +186,18 @@ with tab_studio:
                 time_fmt = sched_time.strftime("%H:%M")
                 date_fmt = sched_date.strftime("%Y-%m-%d")
 
-                # Susunan baris: Kolom A s/d K (Kolom E adalah media_url)
                 row_data = [
-                    date_fmt,             # Kolom A: schedule_date
-                    time_fmt,             # Kolom B: schedule_time
-                    target_account,       # Kolom C: target_accounts
-                    gen_main,             # Kolom D: main_text
-                    gen_media,            # Kolom E: media_url
-                    gen_reply,            # Kolom F: reply_text
-                    f"Mode: {mode}",      # Kolom G: notes
-                    "PENDING",            # Kolom H: status
-                    "",                   # Kolom I: posted_at
-                    "",                   # Kolom J: post_id
-                    ""                    # Kolom K: error_log
+                    date_fmt,
+                    time_fmt,
+                    target_account,
+                    gen_main,
+                    gen_media,
+                    gen_reply,
+                    f"Mode: {mode}",
+                    "PENDING",
+                    "",
+                    "",
+                    ""
                 ]
                 data_ws.append_row(row_data)
                 st.success(f"Berhasil dijadwalkan ke tab 'data' untuk jam {time_fmt} WIB!")
@@ -225,7 +227,6 @@ with tab_katalog:
             if not f_name or not f_link:
                 st.error("Nama Produk dan Link Affiliate wajib diisi.")
             else:
-                # Kolom tab Products: product_name, highlight, affiliate_link, category, status, media_url
                 prod_ws.append_row([f_name, f_highlight, f_link, f_category, f_status, f_media])
                 st.success(f"Produk '{f_name}' berhasil ditambahkan ke katalog!")
                 st.rerun()
