@@ -71,7 +71,12 @@ def randomize_cloudinary_url(url: str) -> str:
     if "res.cloudinary.com" not in url or "/upload/" not in url:
         return url
 
-    # Modifikasi mikro aman untuk file gambar/video
+    # PENTING: JANGAN ubah URL video agar format .mp4 tetap bersih dan tidak error Media Not Found
+    is_vid = any(url.lower().endswith(ext) for ext in [".mp4", ".mov", ".m4v"]) or "/video/upload/" in url
+    if is_vid:
+        return url
+
+    # Randomisasi mikro aman hanya untuk gambar/foto
     sat = random.choice([-4, -2, 2, 4])
     bri = random.choice([-2, -1, 1, 2])
     transform_str = f"e_saturation:{sat},e_brightness:{bri}"
@@ -142,6 +147,8 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
             "text": clean_text,
             "access_token": access_token
         }
+        if reply_to:
+            parent_payload["reply_to_id"] = reply_to
         res = requests.post(url_container, data=parent_payload, timeout=30).json()
 
     # 2. SINGLE MEDIA (1 VIDEO / 1 GAMBAR)
@@ -160,6 +167,9 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
         else:
             payload["media_type"] = "IMAGE"
             payload["image_url"] = m_url
+
+        if reply_to:
+            payload["reply_to_id"] = reply_to
 
         res = requests.post(url_container, data=payload, timeout=30).json()
         if "id" in res and is_vid:
