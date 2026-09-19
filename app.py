@@ -654,11 +654,12 @@ with tabs[0]:
 
                                 if p_type == "viral":
                                     topic = random.choice(VIRAL_TOPICS)
-                                    prompt_v = (
-                                        f"Tulis 1 postingan Threads bahasa Indonesia gaya santai, relate, dan memancing komentar warganet tentang: '{topic}'. "
-                                        f"{style_desc}. {len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
-                                    )
-                                    v_text = call_gemini(prompt_v)
+    prompt_v = (
+        f"Tulis 1 postingan Threads bahasa Indonesia yang sangat relatable, memancing perdebatan santai atau curhat warganet tentang: '{topic}'.\n"
+        f"{PROMPT_RULES_CLEAN}\n"
+        f"Maksimal 220 karakter. Langsung tulis teks postingannya saja."
+    )
+    v_text = call_gemini(prompt_v)
                                     # Kolom E (media_url) kosong
                                     new_rows.append([today_str, slot_time, acc_target, v_text, "", "", "", "PENDING", "", "", ""])
 
@@ -1165,10 +1166,11 @@ with tabs[2]:
                         len_desc = get_length_prompt_desc(act_len)
 
                         prompt = (
-                            f"Tulis 1 postingan Threads bahasa Indonesia yang sangat relatable dan memicu interaksi/komentar warganet tentang: '{curr_topic}'. "
-                            f"Angle: {vb_style}. {len_desc} DILARANG pakai hashtag, tanpa tanda kutip."
-                        )
-                        v_text = call_gemini(prompt)
+    f"Tulis 1 postingan Threads bahasa Indonesia yang sangat relatable dan memicu interaksi warganet tentang: '{curr_topic}'. Angle: {vb_style}.\n"
+    f"{PROMPT_RULES_CLEAN}\n"
+    f"Maksimal 220 karakter. Langsung tulis teks postingannya saja."
+)
+v_text = call_gemini(prompt)
                         gen_list.append({
                             "date": p_dt.strftime("%Y-%m-%d"),
                             "time": p_dt.strftime("%H:%M"),
