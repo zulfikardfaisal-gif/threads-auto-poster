@@ -31,26 +31,32 @@ SPREADSHEET_ID = get_secret("SPREADSHEET_ID")
 GCP_CREDS_BASE64 = get_secret("GCP_CREDS_BASE64")
 AI_API_KEY = get_secret("AI_API_KEY")
 
-# --- POOL HOOK VIRAL THREADS ---
-VIRAL_HOOK_PATTERNS = [
-    "Pola 'Skeptis ke Plot Twist': Awali dengan mengira barang ini awalnya cuma gimik marketing atau gak penting, tapi pas dipakai ternyata ngebantu banget.",
-    "Pola 'Underrated Discovery': Awali dengan rasa heran atau penasaran kenapa barang ini baru disadari fungsinya sekarang padahal praktis banget.",
-    "Pola 'Daily Frustration': Awali dengan masalah sepele harian yang sering bikin repot sebelum nemu solusi simpel ini.",
-    "Pola 'Investasi Kecil Faedah Gede': Awali dengan nada rekomendasi bahwa dengan harga terjangkau manfaatnya berasa banget buat jangka panjang.",
-    "Pola 'Statement Tegas Singkat': Awali dengan 1 kalimat pendek to-the-point yang bikin orang penasaran membaca lanjutannya.",
-    "Pola 'Curhat Solutif': Awali dengan pengalaman setelah sering salah beli atau gonta-ganti barang, akhirnya nemu yang beneran awet.",
-    "Pola 'Spill Santai': Awali seperti lagi spill rahasia printilan berguna ke teman tongkrongan."
-]
-
+# --- POOL TOPIK VIRAL THREADS (DIVERSIFIKASI TEMA NON-FINANSIAL) ---
 VIRAL_TOPICS = [
-    "Dilema dunia kerja, lembur, dan overthinking karir usia 20-an",
-    "Perdebatan belanja impulsif vs hemat yang selalu berakhir boncos",
-    "Curhat realita tinggal di kota besar dan susahnya menabung",
-    "Humor linimasa soal tanggal tua dan godaan checkout marketplace",
-    "Pilihan hidup karir stabil vs bangun bisnis sendiri yang serba spekulatif",
-    "Gaya hidup FOMO vs ketenangan hidup sederhana yang hemat"
+    "Orang yang nge-chat cuma 'P' atau 'Halo' doang tanpa langsung ngomong intinya",
+    "Etika split bill waktu nongkrong rame-rame sama temen tongkrongan",
+    "Grup WhatsApp kerjaan yang masih suka nge-ping di atas jam 8 malam atau weekend",
+    "Lingkaran pertemanan yang menyusut drastis pas masuk usia 25 ke atas",
+    "Kebiasaan menunda cuci piring sampai numpuk vs langsung cuci begitu selesai makan",
+    "Meeting kantor 2 jam yang sebenernya bisa selesai lewat 1 baris pesan email",
+    "Perdebatan orang yang kalau sarapan harus makan nasi berat vs cukup ngopi",
+    "Momen ketika social battery abis dan pengen langsung pulang tanpa pamit panjang",
+    "Teman yang gampang pinjam barang tapi pas balikin gak ada kabar atau rusak",
+    "Seni mengabaikan drama kantor dan fokus kerja seadanya biar gak cepat burnout"
 ]
 
+# --- NEGATIVE CONSTRAINTS (PEMBERSIH GAYA BAHASA SALES) ---
+PROMPT_RULES_CLEAN = """
+DILARANG KERAS:
+1. DILARANG membuat format tanya-jawab sales klise (Contoh terlarang: 'Pusing dengan X? Y solusinya!', 'Lagi bokek?').
+2. DILARANG memakai kata-kata marketing basi: 'solusinya', 'cukup dengan...', 'dijamin', 'hadir untuk Anda', 'yuk buruan'.
+3. DILARANG membuat postingan tentang finansial kaku, investasi reksadana, atau tips menabung formal.
+
+WAJIB:
+- Gunakan sudut pandang orang pertama ('aku', 'kirain', 'jujur baru sadar').
+- Tulis dengan santai, mengalir, sedikit sarkasme ringan, atau keluhan nyata khas linimasa Threads.
+- Tanpa hashtag, tanpa tanda kutip.
+"""
 CLOSING_NARRATIVES = [
     "Btw banyak yang nanya di DM, ini link toko resmi tempat aku beli ya mumpung masih promo:",
     "Biar gak salah beli atau dapet yang zonk, aku taro link official store-nya di sini ya:",
