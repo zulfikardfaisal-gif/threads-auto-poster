@@ -68,42 +68,44 @@ def safe_trim(text: str, limit: int = 480) -> str:
     return trimmed.strip() + "..."
 
 def clean_media_url(url: str) -> str:
-    """Membersihkan URL Cloudinary. Video dibiarkan murni, gambar diacak mikronya."""
     url = str(url).strip()
     if not url:
         return ""
     if "res.cloudinary.com" not in url or "/upload/" not in url:
         return url
 
-    # PENTING: File video tidak boleh disentuh filter agar tidak rusak di Meta API
+    # File video dibiarkan murni tanpa filter
     is_vid = any(url.lower().endswith(ext) for ext in [".mp4", ".mov", ".m4v"]) or "/video/upload/" in url
     if is_vid:
         return url
 
-    # Filter acak mikro khusus gambar/foto
+    # Acak mikro hanya untuk gambar/foto
     sat = random.choice([-4, -2, 2, 4])
     bri = random.choice([-2, -1, 1, 2])
     transform_str = f"e_saturation:{sat},e_brightness:{bri}"
     return url.replace("/upload/", f"/upload/{transform_str}/", 1)
 
-def wait_for_video_processing(creation_id: str, access_token: str, max_retries: int = 25) -> bool:
+def wait_for_container_ready(creation_id: str, access_token: str, max_retries: int = 35) -> bool:
+    """Menunggu kontainer media/carousel selesai diproses server Meta sampai berstatus FINISHED."""
     url = f"https://graph.threads.net/v1.0/{creation_id}?fields=status,error_message&access_token={access_token}"
     for attempt in range(max_retries):
         time.sleep(6)
         try:
             res = requests.get(url, timeout=15).json()
             status = res.get("status")
-            logger.info(f"Cek status video di Meta ({attempt + 1}/{max_retries}): {status}")
+            logger.info(f"Cek status kontainer {creation_id} ({attempt + 1}/{max_retries}): {status}")
             if status in ["FINISHED", "PUBLISHED"]:
                 return True
             if status == "ERROR":
-                err_msg = res.get("error_message", "Meta menolak format file video.")
+                err_msg = res.get("error_message", "Meta menolak format file media ini.")
                 raise Exception(f"Meta Error: {err_msg}")
+            if status == "EXPIRED":
+                raise Exception("Meta Container Expired.")
         except Exception as e:
-            if "Meta Error" in str(e):
+            if "Meta Error" in str(e) or "Meta Container" in str(e):
                 raise
-            logger.warning(f"Menunggu verifikasi video: {e}")
-    raise TimeoutError("Waktu pemrosesan video di Meta habis (lebih dari 2.5 menit).")
+            logger.warning(f"Menunggu verifikasi kontainer: {e}")
+    raise TimeoutError("Waktu pemrosesan di server Meta habis (lebih dari 3.5 menit).")
 
 def post_to_threads(user_id: str, access_token: str, text: str, media_url: str = None, reply_to: str = None) -> str:
     url_container = f"https://graph.threads.net/v1.0/{user_id}/threads"
@@ -134,18 +136,19 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
                 c_payload["media_type"] = "IMAGE"
                 c_payload["image_url"] = m_url
 
-            logger.info(f"Mengunggah item #{m_idx} ({'VIDEO' if is_vid else 'IMAGE'}): {m_url}")
+            logger.info(f"Membuat item slide #{m_idx} ({'VIDEO' if is_vid else 'IMAGE'})...")
             c_res = requests.post(url_container, data=c_payload, timeout=30).json()
             if "id" not in c_res:
                 raise Exception(f"Gagal buat item #{m_idx}: {c_res}")
 
             c_id = c_res["id"]
             if is_vid:
-                wait_for_video_processing(c_id, access_token)
+                wait_for_container_ready(c_id, access_token)
             else:
                 time.sleep(2)
             child_ids.append(c_id)
 
+        # Buat Kontainer Utama Carousel
         parent_payload = {
             "media_type": "CAROUSEL",
             "children": ",".join(child_ids),
@@ -154,7 +157,15 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
         }
         if reply_to:
             parent_payload["reply_to_id"] = reply_to
+
         res = requests.post(url_container, data=parent_payload, timeout=30).json()
+        if "id" not in res:
+            raise Exception(f"Gagal membuat kontainer Carousel utama: {res}")
+
+        creation_id = res["id"]
+        # WAJIB: Tunggu kontainer Carousel utama berstatus FINISHED sebelum dipublish
+        logger.info(f"Menunggu kontainer utama Carousel ({creation_id}) siap...")
+        wait_for_container_ready(creation_id, access_token)
 
     # 2. SINGLE MEDIA (1 VIDEO ATAU 1 GAMBAR)
     elif len(media_list) == 1:
@@ -177,8 +188,15 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
             payload["reply_to_id"] = reply_to
 
         res = requests.post(url_container, data=payload, timeout=30).json()
-        if "id" in res and is_vid:
-            wait_for_video_processing(res["id"], access_token)
+        if "id" not in res:
+            raise Exception(f"Gagal membuat kontainer single media: {res}")
+
+        creation_id = res["id"]
+        if is_vid:
+            logger.info(f"Menunggu video ({creation_id}) selesai diproses Meta...")
+            wait_for_container_ready(creation_id, access_token)
+        else:
+            time.sleep(3)
 
     # 3. TEKS SAJA
     else:
@@ -190,13 +208,13 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
         }
         if reply_to:
             payload["reply_to_id"] = reply_to
+
         res = requests.post(url_container, data=payload, timeout=30).json()
+        if "id" not in res:
+            raise Exception(f"Gagal membuat kontainer teks: {res}")
 
-    if "id" not in res:
-        raise Exception(f"Gagal membuat container Threads: {res}")
-
-    creation_id = res["id"]
-    time.sleep(3)
+        creation_id = res["id"]
+        time.sleep(3)
 
     # PUBLISH POST
     url_publish = f"https://graph.threads.net/v1.0/{user_id}/threads_publish"
@@ -242,7 +260,6 @@ def main():
         row = all_values[row_idx]
         sheet_row_num = row_idx + 1
 
-        # Pembersihan otomatis karakter spasi dan tanda petik
         s_date = row[0].strip().replace("'", "").replace("/", "-") if len(row) > 0 else ""
         s_time = row[1].strip().replace("'", "") if len(row) > 1 else ""
         acc_name = row[2].strip().replace("'", "") if len(row) > 2 else ""
@@ -251,19 +268,17 @@ def main():
         reply_raw = row[5].strip() if len(row) > 5 else ""
         status = row[7].strip().replace("'", "").upper() if len(row) > 7 else ""
 
-        # Normalisasi jam (misal 8:00 jadi 08:00)
         if len(s_time) == 4 and s_time[1] == ":":
             s_time = "0" + s_time
 
         if status == "PENDING":
             logger.info(f"Mengecek Baris #{sheet_row_num}: Tanggal='{s_date}' Jam='{s_time}' Akun='{acc_name}'")
 
-            # Validasi Waktu Tayang
             if s_date > today_str:
-                logger.info(f"Baris #{sheet_row_num} dilewati: Tanggal jadwal ({s_date}) belum tiba.")
+                logger.info(f"Baris #{sheet_row_num} dilewati: Tanggal ({s_date}) belum tiba.")
                 continue
             if s_date == today_str and s_time > now_time_str:
-                logger.info(f"Baris #{sheet_row_num} dilewati: Jam jadwal ({s_time}) belum lewat dari jam sekarang ({now_time_str}).")
+                logger.info(f"Baris #{sheet_row_num} dilewati: Jam ({s_time}) belum tiba.")
                 continue
 
             acc = accounts.get(acc_name)
@@ -275,7 +290,7 @@ def main():
             token = str(acc["access_token"]).strip()
 
             logger.info(f"=== EKSEKUSI POSTING BARIS #{sheet_row_num} ===")
-            logger.info(f"Akun Target: {acc_name}")
+            logger.info(f"Target Akun: {acc_name}")
             logger.info(f"Media URL: '{media_url}'")
 
             try:
@@ -302,7 +317,7 @@ def main():
                 data_ws.update_cell(sheet_row_num, 10, main_id)
                 data_ws.update_cell(sheet_row_num, 11, "")
                 logger.info(f"Baris #{sheet_row_num} selesai sukses!")
-                break  # Berhenti setelah 1 baris sukses per putaran cron
+                break
 
             except Exception as e:
                 err_text = str(e)
