@@ -74,7 +74,7 @@ def clean_media_url(url: str) -> str:
     if "res.cloudinary.com" not in url or "/upload/" not in url:
         return url
 
-    # File video dibiarkan murni tanpa filter
+    # PENTING: File video tidak boleh disentuh filter agar tidak rusak di Meta API
     is_vid = any(url.lower().endswith(ext) for ext in [".mp4", ".mov", ".m4v"]) or "/video/upload/" in url
     if is_vid:
         return url
@@ -86,7 +86,7 @@ def clean_media_url(url: str) -> str:
     return url.replace("/upload/", f"/upload/{transform_str}/", 1)
 
 def wait_for_container_ready(creation_id: str, access_token: str, max_retries: int = 35) -> bool:
-    """Menunggu kontainer media/carousel selesai diproses server Meta sampai berstatus FINISHED."""
+    """Menunggu kontainer media selesai diproses server Meta sampai berstatus FINISHED."""
     url = f"https://graph.threads.net/v1.0/{creation_id}?fields=status,error_message&access_token={access_token}"
     for attempt in range(max_retries):
         time.sleep(6)
@@ -112,15 +112,45 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
     clean_text = safe_trim(text, limit=480)
 
     media_list = []
-    if media_url and not reply_to:
+    if media_url:
         parts = [p.strip() for p in str(media_url).split(",") if p.strip()]
         for p in parts:
             cleaned = clean_media_url(p)
             if cleaned:
                 media_list.append(cleaned)
 
-    # 1. CAROUSEL (2 ATAU LEBIH MEDIA)
-    if len(media_list) > 1:
+    # 1. MODE KOMENTAR (REPLY TO TARGET) DENGAN MEDIA (SINGLE VIDEO / IMAGE)
+    # Meta Threads API tidak mendukung Carousel di dalam komentar, jadi pakai Single Media
+    if reply_to and media_list:
+        m_url = media_list[0]
+        is_vid = any(m_url.lower().endswith(ext) for ext in [".mp4", ".mov", ".m4v"]) or "/video/upload/" in m_url
+        logger.info(f"Komentar Nimbrung dengan {'VIDEO' if is_vid else 'IMAGE'}: {m_url}")
+
+        payload = {
+            "text": clean_text,
+            "reply_to_id": reply_to,
+            "access_token": access_token
+        }
+        if is_vid:
+            payload["media_type"] = "VIDEO"
+            payload["video_url"] = m_url
+        else:
+            payload["media_type"] = "IMAGE"
+            payload["image_url"] = m_url
+
+        res = requests.post(url_container, data=payload, timeout=30).json()
+        if "id" not in res:
+            raise Exception(f"Gagal membuat kontainer komentar media: {res}")
+
+        creation_id = res["id"]
+        if is_vid:
+            logger.info(f"Menunggu video komentar ({creation_id}) siap...")
+            wait_for_container_ready(creation_id, access_token)
+        else:
+            time.sleep(3)
+
+    # 2. CAROUSEL MANDIRI (2 ATAU LEBIH MEDIA)
+    elif not reply_to and len(media_list) > 1:
         logger.info(f"Tipe: CAROUSEL ({len(media_list)} slide)")
         child_ids = []
         for m_idx, m_url in enumerate(media_list, start=1):
@@ -136,7 +166,7 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
                 c_payload["media_type"] = "IMAGE"
                 c_payload["image_url"] = m_url
 
-            logger.info(f"Membuat item slide #{m_idx} ({'VIDEO' if is_vid else 'IMAGE'})...")
+            logger.info(f"Membuat slide #{m_idx} ({'VIDEO' if is_vid else 'IMAGE'})...")
             c_res = requests.post(url_container, data=c_payload, timeout=30).json()
             if "id" not in c_res:
                 raise Exception(f"Gagal buat item #{m_idx}: {c_res}")
@@ -148,27 +178,22 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
                 time.sleep(2)
             child_ids.append(c_id)
 
-        # Buat Kontainer Utama Carousel
         parent_payload = {
             "media_type": "CAROUSEL",
             "children": ",".join(child_ids),
             "text": clean_text,
             "access_token": access_token
         }
-        if reply_to:
-            parent_payload["reply_to_id"] = reply_to
-
         res = requests.post(url_container, data=parent_payload, timeout=30).json()
         if "id" not in res:
             raise Exception(f"Gagal membuat kontainer Carousel utama: {res}")
 
         creation_id = res["id"]
-        # WAJIB: Tunggu kontainer Carousel utama berstatus FINISHED sebelum dipublish
-        logger.info(f"Menunggu kontainer utama Carousel ({creation_id}) siap...")
+        logger.info(f"Menunggu kontainer Carousel utama ({creation_id}) siap...")
         wait_for_container_ready(creation_id, access_token)
 
-    # 2. SINGLE MEDIA (1 VIDEO ATAU 1 GAMBAR)
-    elif len(media_list) == 1:
+    # 3. SINGLE MEDIA MANDIRI (1 VIDEO ATAU 1 GAMBAR)
+    elif not reply_to and len(media_list) == 1:
         m_url = media_list[0]
         is_vid = any(m_url.lower().endswith(ext) for ext in [".mp4", ".mov", ".m4v"]) or "/video/upload/" in m_url
         logger.info(f"Tipe: SINGLE {'VIDEO' if is_vid else 'IMAGE'} -> {m_url}")
@@ -184,12 +209,9 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
             payload["media_type"] = "IMAGE"
             payload["image_url"] = m_url
 
-        if reply_to:
-            payload["reply_to_id"] = reply_to
-
         res = requests.post(url_container, data=payload, timeout=30).json()
         if "id" not in res:
-            raise Exception(f"Gagal membuat kontainer single media: {res}")
+            raise Exception(f"Gagal membuat kontainer media: {res}")
 
         creation_id = res["id"]
         if is_vid:
@@ -198,9 +220,9 @@ def post_to_threads(user_id: str, access_token: str, text: str, media_url: str =
         else:
             time.sleep(3)
 
-    # 3. TEKS SAJA
+    # 4. TEKS SAJA (MANDIRI ATAU REPLY TEKS)
     else:
-        logger.info("Tipe: TEXT ONLY")
+        logger.info(f"Tipe: TEXT ONLY {'(REPLY TO ' + str(reply_to) + ')' if reply_to else ''}")
         payload = {
             "media_type": "TEXT",
             "text": clean_text,
@@ -267,12 +289,15 @@ def main():
         media_url = row[4].strip().replace("'", "") if len(row) > 4 else ""
         reply_raw = row[5].strip() if len(row) > 5 else ""
         status = row[7].strip().replace("'", "").upper() if len(row) > 7 else ""
+        
+        # Kolom L (Kolom ke-12): Target Reply ID (Thread Hijacking)
+        target_reply_id = row[11].strip().replace("'", "") if len(row) > 11 else ""
 
         if len(s_time) == 4 and s_time[1] == ":":
             s_time = "0" + s_time
 
         if status == "PENDING":
-            logger.info(f"Mengecek Baris #{sheet_row_num}: Tanggal='{s_date}' Jam='{s_time}' Akun='{acc_name}'")
+            logger.info(f"Mengecek Baris #{sheet_row_num}: Tanggal='{s_date}' Jam='{s_time}' Akun='{acc_name}' HijackID='{target_reply_id}'")
 
             if s_date > today_str:
                 logger.info(f"Baris #{sheet_row_num} dilewati: Tanggal ({s_date}) belum tiba.")
@@ -290,15 +315,20 @@ def main():
             token = str(acc["access_token"]).strip()
 
             logger.info(f"=== EKSEKUSI POSTING BARIS #{sheet_row_num} ===")
-            logger.info(f"Target Akun: {acc_name}")
-            logger.info(f"Media URL: '{media_url}'")
+            logger.info(f"Akun Target: {acc_name}")
 
             try:
-                # 1. Posting Konten Utama
-                main_id = post_to_threads(user_id, token, main_text, media_url=media_url)
-                logger.info(f"Postingan utama terbit (ID: {main_id})")
+                # 1. Posting Komentar Utama (Dengan Video/Foto jika ada)
+                if target_reply_id:
+                    logger.info(f"Mode: THREAD HIJACKING (Membalas Post ID: {target_reply_id})")
+                    main_id = post_to_threads(user_id, token, main_text, media_url=media_url, reply_to=target_reply_id)
+                    logger.info(f"Komentar balasan terbit (ID: {main_id})")
+                else:
+                    logger.info("Mode: REGULAR POST (Postingan mandiri)")
+                    main_id = post_to_threads(user_id, token, main_text, media_url=media_url)
+                    logger.info(f"Postingan utama terbit (ID: {main_id})")
 
-                # 2. Posting Rantai Balasan (Link Shopee)
+                # 2. Posting Rantai Balasan (Spill Link Shopee di bawah komentar sendiri)
                 if reply_raw:
                     reply_parts = [p.strip() for p in re.split(r"-{2,}\s*REPLY\s*-{2,}", reply_raw, flags=re.IGNORECASE) if p.strip()]
                     parent_id = main_id
@@ -309,7 +339,7 @@ def main():
                             parent_id = post_to_threads(user_id, token, part, reply_to=parent_id)
                         except Exception:
                             parent_id = post_to_threads(user_id, token, part, reply_to=main_id)
-                        logger.info(f"Balasan #{r_idx}/{len(reply_parts)} terbit (ID: {parent_id})")
+                        logger.info(f"Balasan link #{r_idx}/{len(reply_parts)} terbit (ID: {parent_id})")
 
                 # Update Status Sukses ke Spreadsheet
                 data_ws.update_cell(sheet_row_num, 8, "POSTED")
